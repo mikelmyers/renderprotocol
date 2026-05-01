@@ -13,6 +13,12 @@ export interface ToolCallResponse {
   text: string | null;
 }
 
+export interface ResourceReadResponse {
+  raw: unknown;
+  mime_type: string | null;
+  text: string | null;
+}
+
 export const ipc = {
   async listTools(): Promise<unknown> {
     return invoke("mcp_list_tools");
@@ -23,6 +29,10 @@ export const ipc = {
     args?: Record<string, unknown>,
   ): Promise<ToolCallResponse> {
     return invoke("mcp_call_tool", { name, arguments: args ?? null });
+  },
+
+  async readResource(uri: string): Promise<ResourceReadResponse> {
+    return invoke("mcp_read_resource", { uri });
   },
 
   async emitBus(event: BusEvent): Promise<void> {

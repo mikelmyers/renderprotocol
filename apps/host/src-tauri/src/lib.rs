@@ -90,6 +90,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::mcp::mcp_list_tools,
             commands::mcp::mcp_call_tool,
+            commands::mcp::mcp_read_resource,
             commands::bus::bus_emit,
         ])
         .run(tauri::generate_context!())

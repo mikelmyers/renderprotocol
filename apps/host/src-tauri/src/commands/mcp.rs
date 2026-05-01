@@ -15,6 +15,13 @@ pub struct ToolCallResponse {
     pub text: Option<String>,
 }
 
+#[derive(Serialize)]
+pub struct ResourceReadResponse {
+    pub raw: Value,
+    pub mime_type: Option<String>,
+    pub text: Option<String>,
+}
+
 #[tauri::command]
 pub async fn mcp_list_tools(state: State<'_, AppState>) -> Result<Value, String> {
     state
@@ -38,6 +45,23 @@ pub async fn mcp_call_tool(
     Ok(ToolCallResponse {
         raw: result.raw,
         structured: result.structured,
+        text: result.text,
+    })
+}
+
+#[tauri::command]
+pub async fn mcp_read_resource(
+    state: State<'_, AppState>,
+    uri: String,
+) -> Result<ResourceReadResponse, String> {
+    let result = state
+        .carrier
+        .read_resource(&uri)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(ResourceReadResponse {
+        raw: result.raw,
+        mime_type: result.mime_type,
         text: result.text,
     })
 }

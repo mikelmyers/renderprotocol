@@ -9,7 +9,7 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use super::{CarrierError, CarrierRouter};
-use crate::protocols::mcp::{McpClient, ToolCallResult};
+use crate::protocols::mcp::{McpClient, ResourceReadResult, ToolCallResult};
 
 pub struct PassthroughCarrier {
     mcp: Arc<McpClient>,
@@ -30,6 +30,10 @@ impl PassthroughCarrier {
         arguments: Option<Value>,
     ) -> Result<ToolCallResult, CarrierError> {
         Ok(self.mcp.call_tool(name, arguments).await?)
+    }
+
+    pub async fn read_resource(&self, uri: &str) -> Result<ResourceReadResult, CarrierError> {
+        Ok(self.mcp.read_resource(uri).await?)
     }
 }
 
