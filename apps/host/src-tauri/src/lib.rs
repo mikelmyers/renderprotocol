@@ -1,14 +1,19 @@
 pub mod bus;
 pub mod carrier;
 pub mod commands;
+pub mod config_parser;
+pub mod config_store;
+pub mod config_watcher;
 pub mod protocols;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 
 use crate::bus::Bus;
 use crate::carrier::PassthroughCarrier;
+use crate::config_store::{ConfigKind, ConfigStore};
 use crate::protocols::mcp::McpClient;
 
 /// Shared state injected into every Tauri command via `State<'_, AppState>`.
@@ -17,6 +22,7 @@ pub struct AppState {
     pub mcp: Arc<McpClient>,
     pub carrier: Arc<PassthroughCarrier>,
     pub bus: Arc<Bus>,
+    pub config: Arc<ConfigStore>,
 }
 
 const DEFAULT_MCP_ENDPOINT: &str = "http://127.0.0.1:4717/mcp";
@@ -36,6 +42,7 @@ pub fn run() {
     let mcp = Arc::new(McpClient::new(endpoint.clone()));
     let carrier = Arc::new(PassthroughCarrier::new(mcp.clone()));
     let bus = Bus::new();
+    let config = Arc::new(ConfigStore::new());
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -43,15 +50,14 @@ pub fn run() {
             mcp: mcp.clone(),
             carrier,
             bus,
+            config: config.clone(),
         })
         .setup(move |app| {
             let handle = app.handle().clone();
             let mcp_for_init = mcp.clone();
             let endpoint_for_log = endpoint.clone();
 
-            // Best-effort initialize at boot. The mock server may still be
-            // starting (scripts/dev.sh launches both in parallel); retry
-            // briefly. Final failure surfaces to the frontend via an event.
+            // ── MCP initialize ──────────────────────────────────────
             tauri::async_runtime::spawn(async move {
                 tracing::info!(endpoint = %endpoint_for_log, "initializing MCP client");
                 let mut attempts = 0u32;
@@ -85,6 +91,39 @@ pub fn run() {
                 }
             });
 
+            // ── Config load + watch ─────────────────────────────────
+            // For v0 the config dir resolves to `config/` relative to the
+            // current working directory (the project root in `tauri dev`).
+            // Production builds need a different resolver (app data dir
+            // or a user-selected directory) — TODO when bundling lands.
+            let config_dir = resolve_config_dir();
+            let config_for_load = config.clone();
+            let handle_for_load = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                load_initial_config(&config_dir, &config_for_load).await;
+                let _ = handle_for_load.emit(
+                    "config:ready",
+                    serde_json::json!({ "dir": config_dir.display().to_string() }),
+                );
+            });
+
+            let watcher_dir = resolve_config_dir();
+            let watcher_handle = app.handle().clone();
+            let watcher_store = config.clone();
+            // We never tear the watcher down during the app's lifetime —
+            // the OS reclaims when the process exits. RecommendedWatcher
+            // isn't necessarily Sync (varies by platform), so rather
+            // than wrapping it in a lock just to satisfy `manage`, we
+            // leak it. Cheap, intentional, well-scoped.
+            match config_watcher::spawn(watcher_handle, watcher_dir, watcher_store) {
+                Ok(watcher) => {
+                    let _ = Box::leak(Box::new(watcher));
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "config watcher failed to start");
+                }
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -92,7 +131,64 @@ pub fn run() {
             commands::mcp::mcp_call_tool,
             commands::mcp::mcp_read_resource,
             commands::bus::bus_emit,
+            commands::config::config_snapshot,
+            commands::config::config_set_active_agent,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+fn resolve_config_dir() -> PathBuf {
+    if let Ok(env) = std::env::var("RENDERPROTOCOL_CONFIG_DIR") {
+        return PathBuf::from(env);
+    }
+    // Walk up from CWD looking for a `config/` dir alongside `package.json`.
+    // In `tauri dev` the CWD is `apps/host/src-tauri`; the config lives at
+    // the repo root. Tolerate a few levels of nesting.
+    if let Ok(cwd) = std::env::current_dir() {
+        let mut probe = cwd.clone();
+        for _ in 0..6 {
+            let candidate = probe.join("config");
+            let pkg = probe.join("package.json");
+            if candidate.is_dir() && pkg.exists() {
+                return candidate;
+            }
+            if !probe.pop() {
+                break;
+            }
+        }
+        // Fall back to CWD/config even if we didn't find the marker.
+        return cwd.join("config");
+    }
+    PathBuf::from("config")
+}
+
+async fn load_initial_config(dir: &PathBuf, store: &ConfigStore) {
+    let user_path = dir.join("user.md");
+    if user_path.is_file() {
+        if let Ok(text) = tokio::fs::read_to_string(&user_path).await {
+            store.upsert(ConfigKind::User, "user", &text);
+        }
+    }
+    let agents_dir = dir.join("agents");
+    if agents_dir.is_dir() {
+        if let Ok(mut entries) = tokio::fs::read_dir(&agents_dir).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let p = entry.path();
+                if !p.is_file() {
+                    continue;
+                }
+                if p.extension().and_then(|s| s.to_str()) != Some("md") {
+                    continue;
+                }
+                let key = match p.file_stem().and_then(|s| s.to_str()) {
+                    Some(s) => s.to_string(),
+                    None => continue,
+                };
+                if let Ok(text) = tokio::fs::read_to_string(&p).await {
+                    store.upsert(ConfigKind::Agent, &key, &text);
+                }
+            }
+        }
+    }
 }

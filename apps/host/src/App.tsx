@@ -1,11 +1,14 @@
 import { useEffect } from "react";
 import { ConversationPanel } from "./components/conversation/ConversationPanel";
+import { AgentPicker } from "./components/conversation/AgentPicker";
 import { RenderField } from "./components/render-field/RenderField";
 import { startSurfaceBus } from "./lib/surface-bus";
+import { startConfig } from "./lib/config";
 
 export default function App() {
   useEffect(() => {
     void startSurfaceBus();
+    void startConfig();
   }, []);
 
   return (
@@ -13,7 +16,7 @@ export default function App() {
       <section className="pane pane--conversation">
         <header className="pane__header">
           <span>Conversation</span>
-          <span>primordia-ops</span>
+          <AgentPicker />
         </header>
         <ConversationPanel />
       </section>
