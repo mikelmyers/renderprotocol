@@ -13,6 +13,7 @@
 
 import {
   TOOL_NAMES,
+  UI_RESOURCE_URIS,
   type AnomaliesResult,
   type CustomerReportsResult,
   type FleetStatusResult,
@@ -180,26 +181,116 @@ const telemetryFeedRule: Rule = {
   },
   buildProps(data) {
     const t = data as TelemetryResult | undefined;
+    const drone_id = t?.drone_id ?? "drone-7";
     const samples: LiveSample[] = (t?.samples ?? []).map((s) => ({
       ts_ms: new Date(s.ts_iso).getTime(),
       value: s.vibration_g,
     }));
     return {
-      entity: `${t?.drone_id ?? "unknown"}/vibration`,
-      label: `${t?.drone_id ?? "unknown"} vibration`,
+      entity: `${drone_id}/vibration`,
+      label: `${drone_id} vibration`,
       unit: "g",
       samples,
+      // Server-pushed updates flow in through the notifications bridge
+      // and append to the chart in real time. Topic shape is the same
+      // string the mock server emits in `notifications/renderprotocol/
+      // data_updated` { topic, payload }.
+      subscribeTopic: `telemetry/${drone_id}`,
       threshold: { warn: 1.2, critical: 1.6 },
     };
   },
 };
 
+// ── ActionCard rule ────────────────────────────────────────────────
+// Generic shape: when a high-priority customer report is unread, surface
+// an Approve/Reject card. Domain-agnostic: substitute "high-priority
+// support email" or "calendar conflict" or "purchase confirmation" and
+// the same rule shape works.
+
+const highPriorityActionRule: Rule = {
+  id: "high-priority-action",
+  primitive: "action_card",
+  // Re-uses the customer reports tool — the card's data comes from there.
+  // No need to fan out a separate fetch.
+  tool: { name: TOOL_NAMES.GET_CUSTOMER_REPORTS },
+  importance: 0.97, // Sits at the top — actions need attention.
+  matches(ctx) {
+    // Fires for any agent that lists customer/report concerns. Generic
+    // enough to apply to consumer agent.md too (e.g. "reply to messages")
+    const sc = findStandingConcern(ctx.user, NEEDLES.customers);
+    if (sc) return userTrace("Standing concerns", sc);
+    const ad = findAgentDefault(ctx.agent, NEEDLES.customers);
+    if (ad) return agentTrace("Defaults", ad);
+    return null;
+  },
+  buildProps(data) {
+    const r = data as CustomerReportsResult | undefined;
+    const target = r?.reports.find((row) => row.unread && row.priority === "high");
+    if (!target) {
+      // Pure "no action right now" — return a sentinel the dispatcher
+      // can hide. Returning empty props would still render a blank
+      // card; we use `_skip` so the slot dispatcher elides it.
+      return { _skip: true };
+    }
+    return {
+      action_id: `reply/${target.id}`,
+      headline: `Reply to ${target.customer}?`,
+      detail: target.subject,
+      meta: {
+        priority: target.priority,
+        received: target.ts_iso,
+      },
+      confidence: 0.7,
+      payload: {
+        report_id: target.id,
+        customer: target.customer,
+      },
+      approve_label: "Draft reply",
+      reject_label: "Not now",
+    };
+  },
+};
+
+// ── MCP App slot ───────────────────────────────────────────────────
+// Demonstrates that the composer can include a SEP-1865 ui:// resource
+// alongside structured-data primitives. The resource itself is the
+// minimal hello sandbox — same one used in the step-2 showcase. Real
+// domain ui:// resources land when an agent.md asks for them.
+
+const mcpAppSlotRule: Rule = {
+  id: "mcp-app-hello",
+  primitive: "mcp_app",
+  tool: null, // ui:// resources are fetched by the McpAppFrame itself, not by the composer.
+  importance: 0.05, // Below everything substantive — this is a wire test.
+  matches(ctx) {
+    // Fires whenever an agent is loaded. Removable via agent.md without
+    // editing this file: a future "## Render extensions" section can
+    // gate it. For v0 it's always on so the iframe path stays exercised.
+    if (ctx.agent) {
+      return {
+        reason: "MCP App slot — hello sandbox",
+        source: { kind: "default" },
+      };
+    }
+    return null;
+  },
+  buildProps() {
+    return {
+      uri: UI_RESOURCE_URIS.HELLO,
+      title: "MCP App — sandbox check",
+      initialHeight: 220,
+    };
+  },
+};
+
 export const MORNING_BRIEF_RULES: Rule[] = [
+  highPriorityActionRule,
   anomaliesRule,
   fleetMapRule,
   weatherAlertRule,
   telemetryFeedRule,
   customerReportsRule,
+  mcpAppSlotRule,
 ];
 
 // ── Watching scan (concerns with no tool match) ──────────────────────

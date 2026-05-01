@@ -57,7 +57,10 @@ pub fn run() {
             let mcp_for_init = mcp.clone();
             let endpoint_for_log = endpoint.clone();
 
-            // ── MCP initialize ──────────────────────────────────────
+            // ── MCP initialize + notifications listener ─────────────
+            let endpoint_for_listener = endpoint.clone();
+            let mcp_for_listener = mcp.clone();
+            let handle_for_listener = handle.clone();
             tauri::async_runtime::spawn(async move {
                 tracing::info!(endpoint = %endpoint_for_log, "initializing MCP client");
                 let mut attempts = 0u32;
@@ -72,6 +75,15 @@ pub fn run() {
                             let _ = handle.emit(
                                 "mcp:ready",
                                 serde_json::json!({ "session": mcp_for_init.session_id() }),
+                            );
+                            // Now that initialize is done, kick off the
+                            // long-lived SSE listener for server-initiated
+                            // notifications. It self-reconnects with
+                            // backoff; no further coordination required.
+                            protocols::mcp::notifications::spawn(
+                                handle_for_listener.clone(),
+                                mcp_for_listener.clone(),
+                                endpoint_for_listener.clone(),
                             );
                             break;
                         }
