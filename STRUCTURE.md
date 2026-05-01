@@ -219,6 +219,18 @@ with a one-click action that re-issues the originating composition request ancho
 
 Carrier ranking and discovery, real auth, payments, multi-tenant onboarding, mobile, real-time hard-latency guarantees, real drone hardware, second operator domain (Legacy Cleanout), public-demo polish. These are **deferred, not forgotten** — the `protocols/` and `carrier/` seams exist precisely so they slot in later.
 
+## 8a. Design north star: Chrome-grade ease of use
+
+The carrier business depends on consumer-scale adoption of the surface, which depends on the surface feeling effortless to someone who has never heard of MCP. Operator workflows live as **progressive disclosure** on top of a default experience that reads as calm, immediate, and obvious — Chrome-grade legibility, not Bloomberg-grade density. Every feature decision asks: *would a first-time user with no operator context find this inviting?* If the answer is no, the feature lives behind a deliberate switch, not in the default path.
+
+Practical implications carried through every increment:
+
+- **Primitives stay domain-agnostic.** A timeline shows events, not "drone events." Domain shaping happens in composition rules, not in the primitive contracts.
+- **Sensible defaults beat configuration.** A user with no `agent.md` should still see something useful on first open. `agent.md` ships with at least one consumer-shaped template alongside operator templates.
+- **Zero-state is a first-class artifact**, not a "we'll fix it later." Empty state is inviting, not blank.
+- **Visual restraint stays the default.** Information density is opt-in via composition, not the baseline.
+- **Composition rules optimize the consumer single-shot case** ("ask once, see one composed answer") as the easy path; operator workflows are the harder case the same engine handles.
+
 ## 9. Build order
 
 1. Tauri shell + bus + `MapView` rendering one mock tool call end-to-end. **(Current increment.)**

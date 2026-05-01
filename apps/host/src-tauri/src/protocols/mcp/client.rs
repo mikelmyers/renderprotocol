@@ -79,6 +79,13 @@ pub struct ToolCallResult {
     pub text: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ResourceReadResult {
+    pub raw: Value,
+    pub mime_type: Option<String>,
+    pub text: Option<String>,
+}
+
 pub struct McpClient {
     http: reqwest::Client,
     endpoint: String,
@@ -180,6 +187,27 @@ impl McpClient {
             .map(str::to_string);
 
         Ok(ToolCallResult { raw, structured, text })
+    }
+
+    /// Fetch a resource by URI. Used for SEP-1865 `ui://` resources but
+    /// works for any resource the server publishes. Returns the raw
+    /// JSON-RPC `result` (`{ contents: [...] }`) plus a convenience
+    /// extraction of the first content block's text + mime.
+    pub async fn read_resource(&self, uri: &str) -> Result<ResourceReadResult, McpError> {
+        let params = json!({ "uri": uri });
+        let raw = self.request("resources/read", Some(params)).await?;
+        let (mime, text) = raw
+            .get("contents")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| arr.first())
+            .map(|c| {
+                let mime = c.get("mimeType").and_then(Value::as_str).map(str::to_string);
+                let text = c.get("text").and_then(Value::as_str).map(str::to_string);
+                (mime, text)
+            })
+            .unwrap_or((None, None));
+
+        Ok(ResourceReadResult { raw, mime_type: mime, text })
     }
 
     async fn request(&self, method: &str, params: Option<Value>) -> Result<Value, McpError> {

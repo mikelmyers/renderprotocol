@@ -7,10 +7,27 @@ import {
   getFleetStatusDefinition,
   handleGetFleetStatus,
 } from "./tools/get-fleet-status.js";
+import {
+  getAnomaliesDefinition,
+  handleGetAnomalies,
+} from "./tools/get-anomalies.js";
+import {
+  getWeatherWindowDefinition,
+  handleGetWeatherWindow,
+} from "./tools/get-weather-window.js";
+import {
+  getCustomerReportsDefinition,
+  handleGetCustomerReports,
+} from "./tools/get-customer-reports.js";
+import {
+  getDroneTelemetryDefinition,
+  handleGetDroneTelemetry,
+} from "./tools/get-drone-telemetry.js";
+import { UI_RESOURCES } from "./ui-resources/hello.js";
 
-// Mock MCP server. Honest implementation of MCP core over Streamable HTTP.
-// v0 exposes a single tool (get_fleet_status); the surface for additional
-// tools, ui:// resources, and notifications grows in subsequent increments.
+// Mock MCP server. Honest implementation of MCP core + the ui:// resource
+// scheme over Streamable HTTP. Tools and resources expand alongside the
+// composition vocabulary they serve.
 
 const PORT = Number(process.env.PORT ?? 4717);
 
@@ -20,6 +37,7 @@ function buildServer(): McpServer {
     { capabilities: { tools: {}, resources: {}, logging: {} } },
   );
 
+  // ── tools ─────────────────────────────────────────────────────────
   server.registerTool(
     getFleetStatusDefinition.name,
     {
@@ -30,15 +48,80 @@ function buildServer(): McpServer {
     async () => handleGetFleetStatus(),
   );
 
+  server.registerTool(
+    getAnomaliesDefinition.name,
+    {
+      title: getAnomaliesDefinition.title,
+      description: getAnomaliesDefinition.description,
+      inputSchema: getAnomaliesDefinition.inputSchema.shape,
+    },
+    async (input) => handleGetAnomalies(input as { range_hours?: number }),
+  );
+
+  server.registerTool(
+    getWeatherWindowDefinition.name,
+    {
+      title: getWeatherWindowDefinition.title,
+      description: getWeatherWindowDefinition.description,
+      inputSchema: getWeatherWindowDefinition.inputSchema.shape,
+    },
+    async () => handleGetWeatherWindow(),
+  );
+
+  server.registerTool(
+    getCustomerReportsDefinition.name,
+    {
+      title: getCustomerReportsDefinition.title,
+      description: getCustomerReportsDefinition.description,
+      inputSchema: getCustomerReportsDefinition.inputSchema.shape,
+    },
+    async () => handleGetCustomerReports(),
+  );
+
+  server.registerTool(
+    getDroneTelemetryDefinition.name,
+    {
+      title: getDroneTelemetryDefinition.title,
+      description: getDroneTelemetryDefinition.description,
+      inputSchema: getDroneTelemetryDefinition.inputSchema.shape,
+    },
+    async (input) =>
+      handleGetDroneTelemetry(
+        input as { drone_id: string; range_seconds?: number },
+      ),
+  );
+
+  // ── ui:// resources (SEP-1865) ───────────────────────────────────
+  // Each ui:// resource is registered as an MCP resource so that the
+  // host's resources/list and resources/read calls work uniformly across
+  // all resource kinds.
+  for (const r of Object.values(UI_RESOURCES)) {
+    server.registerResource(
+      r.name,
+      r.uri,
+      {
+        title: r.name,
+        description: r.description,
+        mimeType: r.mimeType,
+      },
+      async () => ({
+        contents: [
+          {
+            uri: r.uri,
+            mimeType: r.mimeType,
+            text: r.text,
+          },
+        ],
+      }),
+    );
+  }
+
   return server;
 }
 
 const app = express();
 app.use(express.json());
 
-// Stateful sessions are only meaningful once we add server-initiated
-// notifications (next increment). For now we keep the session map ready and
-// route by mcp-session-id so the wiring is in place.
 const transports = new Map<string, StreamableHTTPServerTransport>();
 
 app.post("/mcp", async (req, res) => {

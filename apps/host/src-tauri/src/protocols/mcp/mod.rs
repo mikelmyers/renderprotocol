@@ -8,7 +8,7 @@
 
 pub mod client;
 
-pub use client::{McpClient, McpError, ToolCallResult};
+pub use client::{McpClient, McpError, ResourceReadResult, ToolCallResult};
 
 use crate::protocols::ProtocolAdapter;
 
