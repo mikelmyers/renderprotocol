@@ -1,0 +1,208 @@
+/* Render Surface — base styles.
+ * Calm interface principle (per docs/render_surface_design_document.md §2.7):
+ * low chroma, type-driven hierarchy, generous whitespace, motion only when
+ * informative. v0 visual language is intentionally restrained.
+ */
+
+:root {
+  --bg: #0e1014;
+  --bg-elevated: #161922;
+  --bg-overlay: #1d2230;
+  --border: #262b38;
+  --border-strong: #353c4d;
+  --text: #e7e9ee;
+  --text-muted: #8b93a7;
+  --text-faint: #5a6173;
+  --accent: #7aa2ff;
+  --accent-soft: rgba(122, 162, 255, 0.16);
+  --warn: #f0b66a;
+  --danger: #f47373;
+  --ok: #74d39a;
+  --selection: rgba(122, 162, 255, 0.28);
+
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter",
+    "Segoe UI", Roboto, sans-serif;
+  --font-mono: "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+#root {
+  display: flex;
+  flex-direction: column;
+}
+
+button {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+}
+
+/* ─── Two-pane shell ─────────────────────────────────────────────── */
+
+.shell {
+  display: grid;
+  grid-template-columns: minmax(280px, 30fr) minmax(0, 70fr);
+  height: 100vh;
+  overflow: hidden;
+}
+
+.pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.pane--conversation {
+  border-right: 1px solid var(--border);
+  background: var(--bg-elevated);
+}
+
+.pane--render {
+  background: var(--bg);
+}
+
+.pane__header {
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.pane__body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 14px 16px;
+}
+
+/* ─── Conversation panel ─────────────────────────────────────────── */
+
+.conversation__placeholder {
+  color: var(--text-faint);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.conversation__system {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 6px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+}
+
+/* ─── Render field ───────────────────────────────────────────────── */
+
+.render-field {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.render-field__empty {
+  margin: auto;
+  color: var(--text-faint);
+  font-size: 13px;
+}
+
+/* ElementWrapper — every primitive is wrapped so click + selection work
+ * uniformly. Selected state is a subtle ring, not a heavy color shift. */
+.element {
+  position: relative;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  transition: border-color 120ms ease;
+}
+.element:hover {
+  border-color: var(--border-strong);
+}
+.element--selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+/* MapView */
+.map-view {
+  height: 480px;
+  width: 100%;
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg-overlay);
+}
+
+.map-view__leaflet {
+  height: 100%;
+  width: 100%;
+}
+
+/* Status badge inside marker tooltip */
+.status-badge {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.status-badge--active   { background: rgba(116,211,154,0.18); color: var(--ok); }
+.status-badge--idle     { background: rgba(139,147,167,0.18); color: var(--text-muted); }
+.status-badge--charging { background: rgba(240,182,106,0.18); color: var(--warn); }
+.status-badge--grounded { background: rgba(244,115,115,0.18); color: var(--danger); }
+.status-badge--offline  { background: rgba(244,115,115,0.10); color: var(--text-muted); }
+
+/* Connection state strip */
+.connection-strip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  font-size: 12px;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elevated);
+}
+.connection-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-faint);
+}
+.connection-dot--ready { background: var(--ok); }
+.connection-dot--error { background: var(--danger); }
+
+/* Leaflet defaults — make tile layer fit the dark theme softly */
+.leaflet-container {
+  background: var(--bg-overlay);
+}
