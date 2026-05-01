@@ -4,11 +4,13 @@ import { AgentPicker } from "./components/conversation/AgentPicker";
 import { RenderField } from "./components/render-field/RenderField";
 import { startSurfaceBus } from "./lib/surface-bus";
 import { startConfig } from "./lib/config";
+import { startNotifications } from "./lib/notifications";
 
 export default function App() {
   useEffect(() => {
     void startSurfaceBus();
     void startConfig();
+    void startNotifications();
   }, []);
 
   return (

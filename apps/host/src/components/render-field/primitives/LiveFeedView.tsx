@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ElementWrapper } from "../ElementWrapper";
 import { makeElementId, surfaceBus } from "../../../lib/surface-bus";
+import { subscribeTopic as subscribeNotificationTopic } from "../../../lib/notifications";
 
 // Generic live-feed primitive. Renders a simple sparkline + the latest
 // value for a stream of timestamped numeric samples. Updates push new
@@ -30,6 +31,12 @@ interface Props {
   // an unsubscribe function. If omitted, the chart renders the static
   // `samples` only.
   subscribe?: (onSample: (s: LiveSample) => void) => () => void;
+  // Or — if both `subscribe` and `subscribeTopic` are unset, the chart
+  // renders static samples. If `subscribeTopic` is set, the view
+  // subscribes to the notifications bridge and appends server-pushed
+  // samples. `subscribe` takes precedence if both are provided
+  // (for tests / fixtures).
+  subscribeTopic?: string;
   // Threshold lines drawn faintly behind the sparkline.
   threshold?: { warn?: number; critical?: number };
   height?: number;
@@ -46,6 +53,7 @@ export function LiveFeedView({
   unit,
   samples: initial,
   subscribe,
+  subscribeTopic,
   threshold,
   height = DEFAULT_HEIGHT,
 }: Props) {
@@ -68,16 +76,30 @@ export function LiveFeedView({
   }, [initial]);
 
   useEffect(() => {
-    if (!subscribe) return;
-    const off = subscribe((s) => {
+    const append = (s: LiveSample) => {
       setSamples((prev) => {
         const next = prev.length >= MAX_POINTS ? prev.slice(-MAX_POINTS + 1) : prev.slice();
         next.push(s);
         return next;
       });
-    });
-    return off;
-  }, [subscribe]);
+    };
+    if (subscribe) {
+      return subscribe(append);
+    }
+    if (subscribeTopic) {
+      return subscribeNotificationTopic(subscribeTopic, (payload) => {
+        const p = payload as Partial<LiveSample> | null;
+        if (
+          p &&
+          typeof p.ts_ms === "number" &&
+          typeof p.value === "number"
+        ) {
+          append({ ts_ms: p.ts_ms, value: p.value });
+        }
+      });
+    }
+    return undefined;
+  }, [subscribe, subscribeTopic]);
 
   // Register on mount; emit element_updated when the latest value changes.
   const lastValRef = useRef<number | null>(null);

@@ -20,7 +20,8 @@ export type PrimitiveKind =
   | "narrative"
   | "table"
   | "live_feed"
-  | "mcp_app";
+  | "mcp_app"
+  | "action_card";
 
 export interface SlotSpec {
   /** Stable id within the composition; used for layout keying + traces. */
@@ -152,6 +153,10 @@ export function assemble(
     .map(({ rule, trace }, i): SlotSpec | null => {
       const dataForRule = rule.tool ? data.get(toolKey(rule.tool.name, rule.tool.args)) : null;
       const props = rule.buildProps(dataForRule, ctx);
+      // A rule may opt out at assembly time (e.g. "no high-priority
+      // action right now") by returning props._skip. Cleaner than
+      // making the predicate a fat function over post-fetch data.
+      if (props && (props as { _skip?: unknown })._skip) return null;
       // Slot id uses `__` so the address grammar's `/` separator stays
       // a 4-segment composite when slot.id is passed as `composition` to
       // primitives. Otherwise ElementWrapper generates 5-segment IDs and

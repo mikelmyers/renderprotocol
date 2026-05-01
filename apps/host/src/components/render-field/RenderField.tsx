@@ -8,6 +8,8 @@ import { TimelineView, type TimelineEvent } from "./primitives/TimelineView";
 import { AlertView, type AlertAction, type AlertTone } from "./primitives/AlertView";
 import { TabularView, type TabularColumn, type TabularRow } from "./primitives/TabularView";
 import { LiveFeedView, type LiveSample } from "./primitives/LiveFeedView";
+import { ActionCard, type ActionCardProps } from "./primitives/ActionCard";
+import { McpAppFrame } from "./primitives/McpAppFrame";
 
 // Composition-driven render field. Used to be a hand-wired showcase;
 // now it interprets a LayoutSpec produced by the composer. The slot →
@@ -151,7 +153,19 @@ interface LiveFeedProps {
   label: string;
   unit?: string;
   samples: LiveSample[];
+  subscribeTopic?: string;
   threshold?: { warn?: number; critical?: number };
+}
+
+type ActionCardSlotProps = Omit<
+  ActionCardProps,
+  "composition" | "source_tool" | "entity"
+> & { entity?: string };
+
+interface McpAppSlotProps {
+  uri: string;
+  title?: string;
+  initialHeight?: number;
 }
 
 function renderSlot(slot: SlotSpec): React.ReactNode {
@@ -202,14 +216,45 @@ function renderSlot(slot: SlotSpec): React.ReactNode {
           label={p.label}
           {...(p.unit !== undefined ? { unit: p.unit } : {})}
           samples={p.samples}
+          {...(p.subscribeTopic !== undefined ? { subscribeTopic: p.subscribeTopic } : {})}
           {...(p.threshold !== undefined ? { threshold: p.threshold } : {})}
         />
       );
     }
+    case "action_card": {
+      const p = slot.props as ActionCardSlotProps;
+      return (
+        <ActionCard
+          composition={slot.id}
+          source_tool={slot.source_tool}
+          entity={p.entity ?? "action"}
+          action_id={p.action_id}
+          headline={p.headline}
+          {...(p.detail !== undefined ? { detail: p.detail } : {})}
+          {...(p.meta !== undefined ? { meta: p.meta } : {})}
+          {...(p.confidence !== undefined ? { confidence: p.confidence } : {})}
+          {...(p.tool !== undefined ? { tool: p.tool } : {})}
+          {...(p.payload !== undefined ? { payload: p.payload } : {})}
+          {...(p.approve_label !== undefined ? { approve_label: p.approve_label } : {})}
+          {...(p.reject_label !== undefined ? { reject_label: p.reject_label } : {})}
+        />
+      );
+    }
+    case "mcp_app": {
+      const p = slot.props as McpAppSlotProps;
+      return (
+        <McpAppFrame
+          composition={slot.id}
+          source_tool={slot.source_tool}
+          entity="frame"
+          uri={p.uri}
+          {...(p.title !== undefined ? { title: p.title } : {})}
+          {...(p.initialHeight !== undefined ? { initialHeight: p.initialHeight } : {})}
+        />
+      );
+    }
     case "narrative":
-    case "mcp_app":
-      // Narrative renders in the conversation panel; mcp_app slots arrive
-      // when the anomaly scenario lands (step 6).
+      // Narrative renders in the conversation panel.
       return null;
   }
   void (slot.primitive satisfies never);
@@ -232,6 +277,8 @@ function titleFor(slot: SlotSpec): string {
       return "Narrative";
     case "mcp_app":
       return "MCP app";
+    case "action_card":
+      return "Suggested action";
   }
 }
 
