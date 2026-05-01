@@ -9,6 +9,7 @@ import { useQueries } from "@tanstack/react-query";
 import { useEffect, useMemo } from "react";
 import { create } from "zustand";
 
+import { recordAudit } from "./audit";
 import { useConfig, type ParsedDoc } from "./config";
 import { ipc } from "./ipc";
 import {
@@ -166,6 +167,23 @@ export function useComposition(intent: string, mcpReady: boolean): UseCompositio
       watching: layout.watching,
       status: "ready",
       error: null,
+    });
+
+    // Record the composition for the X-ray drawer. Audit is best-effort;
+    // failures are logged in the wrapper.
+    void recordAudit("composition.assembled", {
+      intent,
+      slot_count: layout.slots.length,
+      slots: layout.slots.map((s) => ({
+        id: s.id,
+        primitive: s.primitive,
+        source_tool: s.source_tool,
+        trace: s.trace,
+        importance: Number(s.importance.toFixed(3)),
+      })),
+      watching: layout.watching.map((w) => w.label),
+      narrative_bytes: narrative.body.length,
+      narrative_refs: narrative.refs.length,
     });
     // Composition plan + the queries' data are the meaningful triggers.
     // queries themselves are a fresh array each render so depend on a

@@ -16,10 +16,13 @@ use std::time::{Duration, Instant};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use parking_lot::Mutex;
 use serde::Serialize;
-use tauri::{AppHandle, Emitter};
+use serde_json::json;
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::mpsc;
 
+use crate::audit::NewEvent;
 use crate::config_store::{ConfigKind, ConfigStore};
+use crate::AppState;
 
 const DEBOUNCE: Duration = Duration::from_millis(250);
 
@@ -126,6 +129,11 @@ async fn handle_path(
         match tokio::fs::read_to_string(path).await {
             Ok(text) => {
                 store.upsert(kind.clone(), &key, &text);
+                audit(app, "config.reloaded", json!({
+                    "kind": kind_str(&kind),
+                    "key": &key,
+                    "bytes": text.len(),
+                }));
                 let _ = app.emit(
                     "config:changed",
                     ConfigChangedEvent {
@@ -141,6 +149,10 @@ async fn handle_path(
         }
     } else {
         store.remove(&kind, &key);
+        audit(app, "config.removed", json!({
+            "kind": kind_str(&kind),
+            "key": &key,
+        }));
         let _ = app.emit(
             "config:changed",
             ConfigChangedEvent {
@@ -149,6 +161,19 @@ async fn handle_path(
                 action: ConfigChangeAction::Removed,
             },
         );
+    }
+}
+
+fn kind_str(kind: &ConfigKind) -> &'static str {
+    match kind {
+        ConfigKind::User => "user",
+        ConfigKind::Agent => "agent",
+    }
+}
+
+fn audit(app: &AppHandle, kind: &str, payload: serde_json::Value) {
+    if let Some(state) = app.try_state::<AppState>() {
+        state.audit.record(NewEvent::of(kind.to_string(), payload));
     }
 }
 
