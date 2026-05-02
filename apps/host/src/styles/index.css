@@ -975,3 +975,164 @@ button {
   font-size: 12px;
   color: var(--danger);
 }
+
+/* ─── X-ray drawer ──────────────────────────────────────────────── */
+
+.xray-toggle {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.xray-toggle:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.xray-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  height: 100vh;
+  width: 480px;
+  max-width: 90vw;
+  background: var(--bg-elevated);
+  border-left: 1px solid var(--border-strong);
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.45);
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+}
+
+.xray-drawer__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.xray-drawer__title {
+  font-size: 13px;
+  margin: 0;
+  letter-spacing: 0.02em;
+}
+
+.xray-drawer__close {
+  background: transparent;
+  border: 0;
+  font-size: 22px;
+  line-height: 1;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.xray-drawer__close:hover { color: var(--text); }
+
+.xray-drawer__filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.xray-drawer__filter {
+  background: var(--bg-overlay);
+  border: 1px solid var(--border-strong);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  letter-spacing: 0.02em;
+}
+.xray-drawer__filter:hover { color: var(--text); }
+.xray-drawer__filter--active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.xray-drawer__error {
+  padding: 8px 14px;
+  font-size: 12px;
+  color: var(--danger);
+  background: rgba(244, 115, 115, 0.08);
+  border-bottom: 1px solid var(--border);
+}
+
+.xray-drawer__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  flex: 1;
+  overflow-y: auto;
+}
+
+.xray-drawer__empty {
+  padding: 16px;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+.xray-row {
+  border-bottom: 1px solid var(--border);
+  padding: 6px 14px;
+  cursor: pointer;
+}
+.xray-row:hover {
+  background: rgba(122, 162, 255, 0.04);
+}
+
+.xray-row__head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.xray-row__id {
+  color: var(--text-faint);
+  min-width: 36px;
+}
+
+.xray-row__time {
+  color: var(--text-faint);
+  min-width: 88px;
+}
+
+.xray-row__kind {
+  color: var(--text);
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.xray-row__parent {
+  color: var(--text-faint);
+  font-size: 10.5px;
+}
+
+.xray-row__payload {
+  margin: 6px 0 4px 46px;
+  padding: 8px 10px;
+  background: var(--bg-overlay);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 320px;
+  overflow: auto;
+}

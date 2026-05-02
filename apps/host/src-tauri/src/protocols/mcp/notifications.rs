@@ -17,10 +17,12 @@ use std::time::Duration;
 use futures::StreamExt;
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use tauri::{AppHandle, Emitter};
+use serde_json::{json, Value};
+use tauri::{AppHandle, Emitter, Manager};
 
 use super::client::McpClient;
+use crate::audit::NewEvent;
+use crate::AppState;
 
 const SSE_RECONNECT_DELAY: Duration = Duration::from_secs(2);
 const SSE_RECONNECT_MAX: Duration = Duration::from_secs(30);
@@ -138,14 +140,35 @@ fn process_payload(app: &AppHandle, payload: &str) {
         return;
     }
 
+    let method_str = method.unwrap().to_string();
+    let params = value.get("params").cloned();
+
+    // Audit before emit so the drawer can show notifications even if the
+    // frontend listener is paused or temporarily disconnected.
+    if let Some(state) = app.try_state::<AppState>() {
+        state.audit.record(NewEvent::of(
+            format!("mcp.notification.{}", sanitize_kind(&method_str)),
+            json!({
+                "method": &method_str,
+                "params": params.clone().unwrap_or(Value::Null),
+            }),
+        ));
+    }
+
     let n = McpNotification {
-        method: method.unwrap().to_string(),
-        params: value.get("params").cloned(),
+        method: method_str,
+        params,
     };
 
     if let Err(e) = app.emit("mcp:notification", &n) {
         tracing::warn!(error = %e, "failed to emit mcp:notification");
     }
+}
+
+fn sanitize_kind(method: &str) -> String {
+    // Audit kinds are flat strings; preserve the method shape but drop
+    // path-style separators so SQL prefix searches stay intuitive.
+    method.replace('/', ".")
 }
 
 fn find_event_boundary(s: &str) -> Option<usize> {

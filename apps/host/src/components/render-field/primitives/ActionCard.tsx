@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { ElementWrapper } from "../ElementWrapper";
 import { makeElementId } from "../../../lib/surface-bus";
 import { ipc } from "../../../lib/ipc";
+import { recordAudit } from "../../../lib/audit";
 
 // Generic Approve/Reject card. Used anywhere the agent has a suggestion
 // that wants the user's call before it goes anywhere — "send this
@@ -68,6 +69,16 @@ export function ActionCard({
   const submit = async (decision: "approve" | "reject") => {
     setStatus("submitting");
     setError(null);
+    // Record the decision before dispatch so the X-ray drawer carries
+    // the operator's intent even if the tool call fails downstream.
+    const auditId = await recordAudit("action.decided", {
+      action_id,
+      intent: headline,
+      decision,
+      tool,
+      composition,
+      element_id: id,
+    });
     try {
       await ipc.callTool(tool, {
         action_id,
@@ -76,9 +87,24 @@ export function ActionCard({
         ...(payload ? { payload } : {}),
       });
       setStatus(decision === "approve" ? "approved" : "rejected");
+      void recordAudit(
+        "action.dispatched",
+        { action_id, decision, tool },
+        auditId,
+      );
     } catch (e) {
       setStatus("error");
       setError(e instanceof Error ? e.message : String(e));
+      void recordAudit(
+        "action.dispatch_failed",
+        {
+          action_id,
+          decision,
+          tool,
+          error: e instanceof Error ? e.message : String(e),
+        },
+        auditId,
+      );
     }
   };
 

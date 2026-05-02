@@ -1,3 +1,4 @@
+pub mod audit;
 pub mod bus;
 pub mod carrier;
 pub mod commands;
@@ -11,6 +12,7 @@ use std::sync::Arc;
 
 use tauri::{Emitter, Manager};
 
+use crate::audit::AuditLog;
 use crate::bus::Bus;
 use crate::carrier::PassthroughCarrier;
 use crate::config_store::{ConfigKind, ConfigStore};
@@ -23,6 +25,7 @@ pub struct AppState {
     pub carrier: Arc<PassthroughCarrier>,
     pub bus: Arc<Bus>,
     pub config: Arc<ConfigStore>,
+    pub audit: Arc<AuditLog>,
 }
 
 const DEFAULT_MCP_ENDPOINT: &str = "http://127.0.0.1:4717/mcp";
@@ -41,18 +44,37 @@ pub fn run() {
 
     let mcp = Arc::new(McpClient::new(endpoint.clone()));
     let carrier = Arc::new(PassthroughCarrier::new(mcp.clone()));
-    let bus = Bus::new();
     let config = Arc::new(ConfigStore::new());
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
-        .manage(AppState {
-            mcp: mcp.clone(),
-            carrier,
-            bus,
-            config: config.clone(),
-        })
         .setup(move |app| {
+            // Audit log lives in Tauri's platform-appropriate app data
+            // directory. Resolved at setup time because we need the
+            // app handle for path resolution.
+            let audit_path = app
+                .path()
+                .app_data_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join("audit.sqlite");
+            tracing::info!(path = %audit_path.display(), "opening audit log");
+            let audit = AuditLog::open(&audit_path)
+                .unwrap_or_else(|e| {
+                    tracing::error!(error = %e, "audit log open failed; aborting");
+                    std::process::exit(1);
+                });
+
+            // Now that we have audit + the rest of the substrate, register
+            // application state. Bus is created here so it can be wired
+            // to the audit log in a single place.
+            let bus = Bus::new(audit.clone());
+            app.manage(AppState {
+                mcp: mcp.clone(),
+                carrier: carrier.clone(),
+                bus: bus.clone(),
+                config: config.clone(),
+                audit: audit.clone(),
+            });
             let handle = app.handle().clone();
             let mcp_for_init = mcp.clone();
             let endpoint_for_log = endpoint.clone();
@@ -145,6 +167,8 @@ pub fn run() {
             commands::bus::bus_emit,
             commands::config::config_snapshot,
             commands::config::config_set_active_agent,
+            commands::audit::audit_query,
+            commands::audit::audit_record,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
