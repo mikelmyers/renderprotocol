@@ -152,22 +152,152 @@ button {
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
-/* MapView */
-.map-view {
-  height: 480px;
-  width: 100%;
+/* ─── Brief composition ──────────────────────────────────────────── */
+
+.brief {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.card {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
   border-radius: 8px;
   overflow: hidden;
+}
+
+.card__header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.card__service {
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.card__summary {
+  font-size: 12px;
+  font-family: var(--font-mono);
+  color: var(--text-faint);
+}
+
+.card__body {
+  padding: 8px 4px 10px;
+}
+
+.card--placeholder .card__header {
+  border-bottom: none;
+}
+
+.card__error {
+  padding: 12px 14px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--danger);
+}
+
+/* Rows shared across most cards */
+.rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.row {
+  padding: 8px 12px;
+  cursor: default;
+}
+.row:hover {
   background: var(--bg-overlay);
 }
 
-.map-view__leaflet {
-  height: 100%;
-  width: 100%;
+.row__main {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
 }
 
-/* Status badge inside marker tooltip */
-.status-badge {
+.row__title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text);
+  min-width: 0;
+}
+
+.row__subject {
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.row__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+.row__time {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+.row__dot {
+  color: var(--text-faint);
+}
+
+.row__preview {
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.row__source {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-faint);
+}
+
+.row__tags {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 2px;
+}
+
+.tag {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-faint);
+  background: var(--bg-overlay);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0 6px;
+}
+
+/* Flag pills — reuse for mail flags, calendar prep, etc. */
+.flag {
   display: inline-block;
   font-family: var(--font-mono);
   font-size: 11px;
@@ -176,11 +306,156 @@ button {
   text-transform: uppercase;
   letter-spacing: 0.05em;
 }
-.status-badge--active   { background: rgba(116,211,154,0.18); color: var(--ok); }
-.status-badge--idle     { background: rgba(139,147,167,0.18); color: var(--text-muted); }
-.status-badge--charging { background: rgba(240,182,106,0.18); color: var(--warn); }
-.status-badge--grounded { background: rgba(244,115,115,0.18); color: var(--danger); }
-.status-badge--offline  { background: rgba(244,115,115,0.10); color: var(--text-muted); }
+.flag--urgent    { background: rgba(244,115,115,0.18); color: var(--danger); }
+.flag--important { background: rgba(240,182,106,0.18); color: var(--warn); }
+.flag--starred   { background: rgba(122,162,255,0.18); color: var(--accent); }
+
+.row--unread .row__subject {
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* Calendar status pills */
+.status-pill {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  letter-spacing: 0.03em;
+  background: var(--bg-overlay);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.status-pill--in_progress { background: rgba(116,211,154,0.18); color: var(--ok); }
+.status-pill--past        { color: var(--text-faint); }
+
+/* Channel badges (chat) */
+.channel {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--bg-overlay);
+  color: var(--text-faint);
+}
+.channel--slack    { color: #d6a35c; }
+.channel--imessage { color: #6cb1ff; }
+.channel--signal   { color: #9b8cff; }
+.channel--whatsapp { color: var(--ok); }
+.channel--discord  { color: #b6a0ff; }
+
+/* Doc source badges */
+.source {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--bg-overlay);
+  color: var(--text-faint);
+}
+
+/* Weather card */
+.weather {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 4px 12px 4px;
+}
+
+.weather__current {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+}
+
+.weather__temp {
+  font-size: 36px;
+  font-weight: 300;
+  color: var(--text);
+  line-height: 1;
+}
+
+.weather__condition {
+  font-size: 14px;
+  color: var(--text);
+}
+
+.weather__sub {
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+.weather__forecast {
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  gap: 4px;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+.weather__hour {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  font-size: 11px;
+}
+
+.weather__hour-label {
+  color: var(--text-faint);
+}
+
+.weather__hour-temp {
+  color: var(--text);
+  font-family: var(--font-mono);
+}
+
+.weather__hour-precip {
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  min-height: 12px;
+}
+
+/* Conversation panel — agent message + hint */
+.agent-message {
+  background: var(--bg-overlay);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-bottom: 12px;
+}
+
+.agent-message__author {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-faint);
+  margin-bottom: 6px;
+}
+
+.agent-message__line {
+  margin: 0 0 4px;
+  font-size: 13px;
+  color: var(--text);
+  line-height: 1.5;
+}
+
+.agent-message__line:last-child {
+  margin-bottom: 0;
+}
+
+.conversation__hint {
+  margin: 12px 0 8px;
+  font-size: 11px;
+  color: var(--text-faint);
+  letter-spacing: 0.02em;
+}
 
 /* Connection state strip */
 .connection-strip {
@@ -202,7 +477,3 @@ button {
 .connection-dot--ready { background: var(--ok); }
 .connection-dot--error { background: var(--danger); }
 
-/* Leaflet defaults — make tile layer fit the dark theme softly */
-.leaflet-container {
-  background: var(--bg-overlay);
-}

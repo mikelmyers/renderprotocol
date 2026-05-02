@@ -1,90 +1,173 @@
-import { useEffect, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import type { FleetStatusResult } from "@renderprotocol/protocol-types";
-import { TOOL_NAMES } from "@renderprotocol/protocol-types";
-import { ipc } from "../../lib/ipc";
-import { MapView } from "./primitives/MapView";
+import {
+  SERVICES,
+  TOOL_NAMES,
+  type ServiceDescriptor,
+} from "@renderprotocol/protocol-types";
+import { useBrief, type BriefResults, type BriefState } from "../../lib/use-brief";
+import { MailCard } from "./primitives/MailCard";
+import { CalendarCard } from "./primitives/CalendarCard";
+import { MessagesCard } from "./primitives/MessagesCard";
+import { NewsCard } from "./primitives/NewsCard";
+import { WeatherCard } from "./primitives/WeatherCard";
+import { DocsCard } from "./primitives/DocsCard";
 
-// First runnable composition: a single MapView populated by one tool call.
-// Subsequent increments expand this into the rule-driven composer + the
-// full primitive vocabulary; for now the wiring is the point.
+// The render field — the right pane. v0 composition is the morning brief:
+// six tool calls fanned out in parallel, each rendered as a card primitive
+// in the order specified by user.md. Cards register as bus elements so the
+// conversation panel can address them; rows inside each card register
+// individually so the user can reference specific items.
 
-type ConnectionState = "connecting" | "ready" | "error";
+const COMPOSITION = "morning-brief";
 
 export function RenderField() {
-  const [connection, setConnection] = useState<ConnectionState>("connecting");
-  const [connectionMessage, setConnectionMessage] = useState<string | null>(null);
-
-  useEffect(() => {
-    let unsubReady: (() => void) | null = null;
-    let unsubError: (() => void) | null = null;
-
-    void ipc.onMcpReady(() => setConnection("ready")).then((u) => {
-      unsubReady = u;
-    });
-    void ipc
-      .onMcpError((msg) => {
-        setConnection("error");
-        setConnectionMessage(msg);
-      })
-      .then((u) => {
-        unsubError = u;
-      });
-
-    return () => {
-      unsubReady?.();
-      unsubError?.();
-    };
-  }, []);
-
-  const fleet = useQuery({
-    queryKey: ["tool", TOOL_NAMES.GET_FLEET_STATUS],
-    enabled: connection === "ready",
-    queryFn: async (): Promise<FleetStatusResult> => {
-      const res = await ipc.callTool(TOOL_NAMES.GET_FLEET_STATUS);
-      // Prefer structured content; fall back to parsing the text block.
-      if (res.structured) return res.structured as FleetStatusResult;
-      if (res.text) return JSON.parse(res.text) as FleetStatusResult;
-      throw new Error("get_fleet_status returned no payload");
-    },
-  });
+  const brief = useBrief();
 
   return (
     <div className="render-field">
-      <ConnectionStrip state={connection} message={connectionMessage} />
+      <ConnectionStrip
+        state={brief.connection}
+        message={brief.connectionMessage}
+      />
       <div className="pane__body">
-        {fleet.isLoading && (
-          <div className="render-field__empty">Loading fleet…</div>
-        )}
-        {fleet.isError && (
+        {brief.connection !== "ready" && (
           <div className="render-field__empty">
-            Tool call failed: {String((fleet.error as Error).message)}
-          </div>
-        )}
-        {fleet.data && (
-          <MapView
-            composition="morning-brief"
-            source_tool={TOOL_NAMES.GET_FLEET_STATUS}
-            data={fleet.data}
-          />
-        )}
-        {connection !== "ready" && !fleet.data && !fleet.isError && (
-          <div className="render-field__empty">
-            {connection === "connecting"
+            {brief.connection === "connecting"
               ? "Waiting for MCP server…"
-              : `MCP unavailable: ${connectionMessage ?? "unknown error"}`}
+              : `MCP unavailable: ${brief.connectionMessage ?? "unknown error"}`}
           </div>
+        )}
+        {brief.connection === "ready" && (
+          <BriefStack brief={brief} />
         )}
       </div>
     </div>
   );
 }
 
+function BriefStack({ brief }: { brief: BriefState }) {
+  return (
+    <div className="brief">
+      {SERVICES.map((service) => (
+        <CardForService
+          key={service.id}
+          service={service}
+          results={brief.results}
+          error={brief.errors[keyOf(service)] ?? null}
+          isLoading={brief.isLoading}
+        />
+      ))}
+    </div>
+  );
+}
+
+function keyOf(service: ServiceDescriptor): keyof BriefResults {
+  switch (service.tool) {
+    case TOOL_NAMES.MAIL_GET_INBOX:
+      return "mail";
+    case TOOL_NAMES.CALENDAR_GET_TODAY:
+      return "calendar";
+    case TOOL_NAMES.MESSAGES_GET_RECENT:
+      return "messages";
+    case TOOL_NAMES.NEWS_GET_FOLLOWING:
+      return "news";
+    case TOOL_NAMES.WEATHER_GET_LOCAL:
+      return "weather";
+    case TOOL_NAMES.DOCS_GET_RECENT:
+      return "docs";
+    default:
+      throw new Error(`unknown tool ${service.tool}`);
+  }
+}
+
+interface CardProps {
+  service: ServiceDescriptor;
+  results: BriefResults;
+  error: string | null;
+  isLoading: boolean;
+}
+
+function CardForService({ service, results, error, isLoading }: CardProps) {
+  // While loading, leave a placeholder card so the layout doesn't reflow once
+  // results arrive — calmer to the eye than a sudden cascade of mounts.
+  if (isLoading && !error) {
+    const k = keyOf(service);
+    if (!results[k]) {
+      return (
+        <div className="card card--placeholder">
+          <header className="card__header">
+            <span className="card__service">{service.label}</span>
+            <span className="card__summary">loading…</span>
+          </header>
+        </div>
+      );
+    }
+  }
+
+  switch (service.tool) {
+    case TOOL_NAMES.MAIL_GET_INBOX:
+      return results.mail ? (
+        <MailCard
+          service={service}
+          composition={COMPOSITION}
+          data={results.mail}
+          error={error}
+        />
+      ) : null;
+    case TOOL_NAMES.CALENDAR_GET_TODAY:
+      return results.calendar ? (
+        <CalendarCard
+          service={service}
+          composition={COMPOSITION}
+          data={results.calendar}
+          error={error}
+        />
+      ) : null;
+    case TOOL_NAMES.MESSAGES_GET_RECENT:
+      return results.messages ? (
+        <MessagesCard
+          service={service}
+          composition={COMPOSITION}
+          data={results.messages}
+          error={error}
+        />
+      ) : null;
+    case TOOL_NAMES.NEWS_GET_FOLLOWING:
+      return results.news ? (
+        <NewsCard
+          service={service}
+          composition={COMPOSITION}
+          data={results.news}
+          error={error}
+        />
+      ) : null;
+    case TOOL_NAMES.WEATHER_GET_LOCAL:
+      return results.weather ? (
+        <WeatherCard
+          service={service}
+          composition={COMPOSITION}
+          data={results.weather}
+          error={error}
+        />
+      ) : null;
+    case TOOL_NAMES.DOCS_GET_RECENT:
+      return results.docs ? (
+        <DocsCard
+          service={service}
+          composition={COMPOSITION}
+          data={results.docs}
+          error={error}
+        />
+      ) : null;
+    default:
+      return null;
+  }
+}
+
 function ConnectionStrip({
   state,
   message,
 }: {
-  state: ConnectionState;
+  state: BriefState["connection"];
   message: string | null;
 }) {
   const dotClass =

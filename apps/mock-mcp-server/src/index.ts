@@ -4,15 +4,53 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import {
-  getFleetStatusDefinition,
-  handleGetFleetStatus,
-} from "./tools/get-fleet-status.js";
+  mailGetInboxDefinition,
+  handleMailGetInbox,
+} from "./tools/mail-get-inbox.js";
+import {
+  calendarGetTodayDefinition,
+  handleCalendarGetToday,
+} from "./tools/calendar-get-today.js";
+import {
+  messagesGetRecentDefinition,
+  handleMessagesGetRecent,
+} from "./tools/messages-get-recent.js";
+import {
+  newsGetFollowingDefinition,
+  handleNewsGetFollowing,
+} from "./tools/news-get-following.js";
+import {
+  weatherGetLocalDefinition,
+  handleWeatherGetLocal,
+} from "./tools/weather-get-local.js";
+import {
+  docsGetRecentDefinition,
+  handleDocsGetRecent,
+} from "./tools/docs-get-recent.js";
 
 // Mock MCP server. Honest implementation of MCP core over Streamable HTTP.
-// v0 exposes a single tool (get_fleet_status); the surface for additional
-// tools, ui:// resources, and notifications grows in subsequent increments.
+// One process exposes six tools, each pretending to be a different "service"
+// the agent can reach: mail, calendar, messages, news, weather, docs. The
+// per-tool naming convention (`<service>_<verb>`) lets the host label which
+// service produced each piece of the brief — even though it's all one server
+// for v0.
 
 const PORT = Number(process.env.PORT ?? 4717);
+
+interface ToolEntry {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  definition: { name: string; title: string; description: string; inputSchema: any };
+  handler: () => ReturnType<typeof handleMailGetInbox>;
+}
+
+const TOOLS: ToolEntry[] = [
+  { definition: mailGetInboxDefinition, handler: handleMailGetInbox },
+  { definition: calendarGetTodayDefinition, handler: handleCalendarGetToday },
+  { definition: messagesGetRecentDefinition, handler: handleMessagesGetRecent },
+  { definition: newsGetFollowingDefinition, handler: handleNewsGetFollowing },
+  { definition: weatherGetLocalDefinition, handler: handleWeatherGetLocal },
+  { definition: docsGetRecentDefinition, handler: handleDocsGetRecent },
+];
 
 function buildServer(): McpServer {
   const server = new McpServer(
@@ -20,15 +58,17 @@ function buildServer(): McpServer {
     { capabilities: { tools: {}, resources: {}, logging: {} } },
   );
 
-  server.registerTool(
-    getFleetStatusDefinition.name,
-    {
-      title: getFleetStatusDefinition.title,
-      description: getFleetStatusDefinition.description,
-      inputSchema: getFleetStatusDefinition.inputSchema.shape,
-    },
-    async () => handleGetFleetStatus(),
-  );
+  for (const { definition, handler } of TOOLS) {
+    server.registerTool(
+      definition.name,
+      {
+        title: definition.title,
+        description: definition.description,
+        inputSchema: definition.inputSchema.shape,
+      },
+      async () => handler(),
+    );
+  }
 
   return server;
 }
@@ -57,7 +97,10 @@ app.post("/mcp", async (req, res) => {
         if (transport!.sessionId) transports.delete(transport!.sessionId);
       };
       const server = buildServer();
-      await server.connect(transport);
+      // SDK's Transport.onclose is required, but StreamableHTTPServerTransport
+      // declares it optional; with exactOptionalPropertyTypes the structural
+      // check fails. Safe to widen — onclose is set above.
+      await server.connect(transport as unknown as Parameters<typeof server.connect>[0]);
     } else if (!transport) {
       res.status(400).json({
         jsonrpc: "2.0",
@@ -94,9 +137,15 @@ app.get("/mcp", handleSessionStream);
 app.delete("/mcp", handleSessionStream);
 
 app.get("/healthz", (_req, res) => {
-  res.json({ ok: true, sessions: transports.size });
+  res.json({
+    ok: true,
+    sessions: transports.size,
+    tools: TOOLS.map((t) => t.definition.name),
+  });
 });
 
 app.listen(PORT, () => {
-  console.log(`[mock-mcp] listening on http://127.0.0.1:${PORT}/mcp`);
+  console.log(
+    `[mock-mcp] listening on http://127.0.0.1:${PORT}/mcp — ${TOOLS.length} tools registered`,
+  );
 });
