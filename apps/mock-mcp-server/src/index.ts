@@ -4,25 +4,29 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import {
-  getFleetStatusDefinition,
-  handleGetFleetStatus,
-} from "./tools/get-fleet-status.js";
+  mailGetInboxDefinition,
+  handleMailGetInbox,
+} from "./tools/mail-get-inbox.js";
 import {
-  getAnomaliesDefinition,
-  handleGetAnomalies,
-} from "./tools/get-anomalies.js";
+  calendarGetTodayDefinition,
+  handleCalendarGetToday,
+} from "./tools/calendar-get-today.js";
 import {
-  getWeatherWindowDefinition,
-  handleGetWeatherWindow,
-} from "./tools/get-weather-window.js";
+  messagesGetRecentDefinition,
+  handleMessagesGetRecent,
+} from "./tools/messages-get-recent.js";
 import {
-  getCustomerReportsDefinition,
-  handleGetCustomerReports,
-} from "./tools/get-customer-reports.js";
+  newsGetFollowingDefinition,
+  handleNewsGetFollowing,
+} from "./tools/news-get-following.js";
 import {
-  getDroneTelemetryDefinition,
-  handleGetDroneTelemetry,
-} from "./tools/get-drone-telemetry.js";
+  weatherGetLocalDefinition,
+  handleWeatherGetLocal,
+} from "./tools/weather-get-local.js";
+import {
+  docsGetRecentDefinition,
+  handleDocsGetRecent,
+} from "./tools/docs-get-recent.js";
 import {
   recordActionDefinition,
   handleRecordAction,
@@ -31,6 +35,12 @@ import { UI_RESOURCES } from "./ui-resources/hello.js";
 
 // Mock MCP server. MCP core + ui:// resources + server-initiated
 // notifications over the Streamable HTTP transport's GET /mcp SSE channel.
+//
+// One process exposes six "service" tools (mail / calendar / messages /
+// news / weather / docs) plus the domain-agnostic record_action and the
+// hello sandbox ui:// resource. The per-tool name prefix
+// (`<service>_<verb>`) lets the host trace which service produced each
+// piece of the morning brief.
 
 const PORT = Number(process.env.PORT ?? 4717);
 
@@ -49,56 +59,63 @@ function buildServer(): McpServer {
 
   // ── tools ─────────────────────────────────────────────────────────
   server.registerTool(
-    getFleetStatusDefinition.name,
+    mailGetInboxDefinition.name,
     {
-      title: getFleetStatusDefinition.title,
-      description: getFleetStatusDefinition.description,
-      inputSchema: getFleetStatusDefinition.inputSchema.shape,
+      title: mailGetInboxDefinition.title,
+      description: mailGetInboxDefinition.description,
+      inputSchema: mailGetInboxDefinition.inputSchema.shape,
     },
-    async () => handleGetFleetStatus(),
+    async () => handleMailGetInbox(),
   );
 
   server.registerTool(
-    getAnomaliesDefinition.name,
+    calendarGetTodayDefinition.name,
     {
-      title: getAnomaliesDefinition.title,
-      description: getAnomaliesDefinition.description,
-      inputSchema: getAnomaliesDefinition.inputSchema.shape,
+      title: calendarGetTodayDefinition.title,
+      description: calendarGetTodayDefinition.description,
+      inputSchema: calendarGetTodayDefinition.inputSchema.shape,
     },
-    async (input) => handleGetAnomalies(input as { range_hours?: number }),
+    async () => handleCalendarGetToday(),
   );
 
   server.registerTool(
-    getWeatherWindowDefinition.name,
+    messagesGetRecentDefinition.name,
     {
-      title: getWeatherWindowDefinition.title,
-      description: getWeatherWindowDefinition.description,
-      inputSchema: getWeatherWindowDefinition.inputSchema.shape,
+      title: messagesGetRecentDefinition.title,
+      description: messagesGetRecentDefinition.description,
+      inputSchema: messagesGetRecentDefinition.inputSchema.shape,
     },
-    async () => handleGetWeatherWindow(),
+    async () => handleMessagesGetRecent(),
   );
 
   server.registerTool(
-    getCustomerReportsDefinition.name,
+    newsGetFollowingDefinition.name,
     {
-      title: getCustomerReportsDefinition.title,
-      description: getCustomerReportsDefinition.description,
-      inputSchema: getCustomerReportsDefinition.inputSchema.shape,
+      title: newsGetFollowingDefinition.title,
+      description: newsGetFollowingDefinition.description,
+      inputSchema: newsGetFollowingDefinition.inputSchema.shape,
     },
-    async () => handleGetCustomerReports(),
+    async () => handleNewsGetFollowing(),
   );
 
   server.registerTool(
-    getDroneTelemetryDefinition.name,
+    weatherGetLocalDefinition.name,
     {
-      title: getDroneTelemetryDefinition.title,
-      description: getDroneTelemetryDefinition.description,
-      inputSchema: getDroneTelemetryDefinition.inputSchema.shape,
+      title: weatherGetLocalDefinition.title,
+      description: weatherGetLocalDefinition.description,
+      inputSchema: weatherGetLocalDefinition.inputSchema.shape,
     },
-    async (input) =>
-      handleGetDroneTelemetry(
-        input as { drone_id: string; range_seconds?: number },
-      ),
+    async () => handleWeatherGetLocal(),
+  );
+
+  server.registerTool(
+    docsGetRecentDefinition.name,
+    {
+      title: docsGetRecentDefinition.title,
+      description: docsGetRecentDefinition.description,
+      inputSchema: docsGetRecentDefinition.inputSchema.shape,
+    },
+    async () => handleDocsGetRecent(),
   );
 
   server.registerTool(
@@ -145,18 +162,11 @@ function buildServer(): McpServer {
 }
 
 // ── server-initiated notifications ────────────────────────────────────
-// Two emitters run while at least one session is active:
-//   - resources/updated for fleet status every 8s. Signals the host to
-//     refetch get_fleet_status — drone positions drift slightly with the
-//     fixture. Generic mechanism: any tool's underlying data can be
-//     declared "updated" by URI.
-//   - renderprotocol/data_updated every second carrying a fresh
-//     telemetry sample. Custom method, generic shape: { topic, payload }.
-//     A live feed primitive subscribed to the matching topic appends each
-//     sample to its sparkline without re-issuing the tool call.
-
-const TELEMETRY_DRONE_ID = "drone-7";
-let telemetryBaseline = 0.5;
+// Keeps the resources/updated mechanism exercised after the scenario
+// pivot. The host's notifications bridge maps URIs to tool refetches,
+// so flagging mail_get_inbox as "updated" prompts the host to refetch
+// and the mail card recomposes — the same generic mechanism the drone
+// scenario used for fleet status.
 
 function broadcast(method: string, params: unknown): void {
   for (const { server } of sessions.values()) {
@@ -173,38 +183,10 @@ function broadcast(method: string, params: unknown): void {
 
 setInterval(() => {
   if (sessions.size === 0) return;
-  // ResourcesUpdated nudges the host to refetch the corresponding tool
-  // (mapping URI → tool happens on the host side, in the notifications
-  // bridge).
   broadcast("notifications/resources/updated", {
-    uri: "renderprotocol://tool/get_fleet_status",
+    uri: "renderprotocol://tool/mail_get_inbox",
   });
-}, 8000);
-
-setInterval(() => {
-  if (sessions.size === 0) return;
-  // Random walk + faint sinusoid so the sparkline is alive but not
-  // chaotic. The telemetry rule pre-warms the chart with a 60s baseline
-  // from the tool call; this keeps it growing in real time.
-  const drift = (Math.random() - 0.5) * 0.12;
-  const wobble = Math.sin(Date.now() / 700) * 0.05;
-  telemetryBaseline = clamp(telemetryBaseline + drift + wobble, 0.05, 2.5);
-  broadcast("notifications/renderprotocol/data_updated", {
-    topic: `telemetry/${TELEMETRY_DRONE_ID}`,
-    payload: {
-      ts_ms: Date.now(),
-      value: roundTo(telemetryBaseline, 3),
-    },
-  });
-}, 1000);
-
-function clamp(v: number, lo: number, hi: number): number {
-  return Math.min(hi, Math.max(lo, v));
-}
-function roundTo(v: number, places: number): number {
-  const f = 10 ** places;
-  return Math.round(v * f) / f;
-}
+}, 30000);
 
 // ── transport plumbing ───────────────────────────────────────────────
 const app = express();
@@ -228,7 +210,10 @@ app.post("/mcp", async (req, res) => {
       };
       const server = buildServer();
       registered = { transport, server };
-      await server.connect(transport);
+      // Widen — SDK's Transport.onclose is required, but
+      // StreamableHTTPServerTransport declares it optional. Safe: onclose
+      // is set above.
+      await server.connect(transport as unknown as Parameters<typeof server.connect>[0]);
       session = registered;
     } else if (!session) {
       res.status(400).json({
@@ -266,7 +251,19 @@ app.get("/mcp", handleSessionStream);
 app.delete("/mcp", handleSessionStream);
 
 app.get("/healthz", (_req, res) => {
-  res.json({ ok: true, sessions: sessions.size });
+  res.json({
+    ok: true,
+    sessions: sessions.size,
+    tools: [
+      mailGetInboxDefinition.name,
+      calendarGetTodayDefinition.name,
+      messagesGetRecentDefinition.name,
+      newsGetFollowingDefinition.name,
+      weatherGetLocalDefinition.name,
+      docsGetRecentDefinition.name,
+      recordActionDefinition.name,
+    ],
+  });
 });
 
 app.listen(PORT, () => {

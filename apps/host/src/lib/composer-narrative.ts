@@ -7,10 +7,10 @@
 
 import type { CompositionPlan, LayoutSpec, NarrativeSpec } from "./composer";
 import type {
-  AnomaliesResult,
-  CustomerReportsResult,
-  FleetStatusResult,
-  WeatherWindow,
+  CalendarTodayResult,
+  InboxBriefResult,
+  MessagesRecentResult,
+  WeatherLocalResult,
 } from "@renderprotocol/protocol-types";
 import { TOOL_NAMES } from "@renderprotocol/protocol-types";
 import { toolKey } from "./composer";
@@ -29,68 +29,83 @@ export function summarize(
     lines.push(`Morning brief — ${active_agent_title}.`);
   }
 
-  const fleet = data.get(toolKey(TOOL_NAMES.GET_FLEET_STATUS)) as FleetStatusResult | undefined;
-  if (fleet) {
-    const active = fleet.drones.filter((d) => d.status === "active").length;
-    const total = fleet.drones.length;
-    lines.push(`Fleet at ${active} of ${total} drones active.`);
-  }
-
-  const anoms = data.get(toolKey(TOOL_NAMES.GET_ANOMALIES)) as AnomaliesResult | undefined;
-  if (anoms) {
-    const flagged = anoms.events.filter((e) => e.severity !== "info");
-    if (flagged.length === 0) {
-      lines.push("No flagged anomalies. Standing watches quiet.");
+  // ── Mail: surface the most urgent flagged thread by name + ref. ──
+  const inbox = data.get(toolKey(TOOL_NAMES.MAIL_GET_INBOX)) as
+    | InboxBriefResult
+    | undefined;
+  if (inbox) {
+    const urgent = inbox.flagged.find(
+      (t) => t.flag === "urgent" && t.unread,
+    );
+    if (urgent) {
+      // Prefer the table's element id since the table is more durable
+      // than the action card (which can _skip on no-action mornings).
+      const slotId = layout.slots.find(
+        (s) =>
+          s.primitive === "table" &&
+          s.source_tool === TOOL_NAMES.MAIL_GET_INBOX,
+      )?.id;
+      const ref = slotId
+        ? `${slotId}/table/${TOOL_NAMES.MAIL_GET_INBOX}/${urgent.thread_id}`
+        : null;
+      if (ref) refs.push(ref);
+      const subject = ref ? `[ref:${ref}]` : `"${urgent.subject}"`;
+      lines.push(`Urgent in mail: ${subject} from ${urgent.from_name}.`);
+    } else if (inbox.flagged.length > 0) {
+      lines.push(
+        `${inbox.unread_count} unread, ${inbox.flagged.length} flagged.`,
+      );
     } else {
-      const slot = layout.slots.find((s) => s.primitive === "timeline");
-      const slotId = slot?.id ?? null;
-      const subset = flagged.slice(0, 2);
-      const tokens = subset.map((e) => {
-        // Anomaly element_ids inside the timeline are
-        // <slotId>/<primitive>/<source_tool>/<entity>. The ElementWrapper
-        // inside TimelineView constructs them via makeElementId, with
-        // composition=slot.id (which uses `__` so the grammar stays
-        // 4-segment).
-        const ref = slotId
-          ? `${slotId}/timeline/${TOOL_NAMES.GET_ANOMALIES}/${e.id}`
-          : null;
-        if (ref) refs.push(ref);
-        return ref ? `[ref:${ref}]` : e.title;
-      });
-      if (subset.length === 1) {
-        lines.push(`One flagged anomaly: ${tokens[0]}.`);
-      } else {
-        lines.push(`Two flagged anomalies: ${tokens[0]} and ${tokens[1]}.`);
-      }
+      lines.push(`${inbox.unread_count} unread.`);
     }
   }
 
-  const weather = data.get(toolKey(TOOL_NAMES.GET_WEATHER_WINDOW)) as
-    | WeatherWindow
+  // ── Calendar: next upcoming event + prep status. ─────────────────
+  const cal = data.get(toolKey(TOOL_NAMES.CALENDAR_GET_TODAY)) as
+    | CalendarTodayResult
+    | undefined;
+  const next = cal?.events.find((e) => e.status === "upcoming");
+  if (next) {
+    const slotId = layout.slots.find(
+      (s) =>
+        s.primitive === "timeline" &&
+        s.source_tool === TOOL_NAMES.CALENDAR_GET_TODAY,
+    )?.id;
+    const ref = slotId
+      ? `${slotId}/timeline/${TOOL_NAMES.CALENDAR_GET_TODAY}/${next.event_id}`
+      : null;
+    if (ref) refs.push(ref);
+    const title = ref ? `[ref:${ref}]` : next.title;
+    const prepNote = next.prep_status === "needs_prep" ? " — needs prep" : "";
+    lines.push(`Next: ${title} at ${shortTime(next.start_iso)}${prepNote}.`);
+  }
+
+  // ── Weather: location + current + headline. ──────────────────────
+  const weather = data.get(toolKey(TOOL_NAMES.WEATHER_GET_LOCAL)) as
+    | WeatherLocalResult
     | undefined;
   if (weather) {
-    if (weather.state === "open") {
-      lines.push(`Weather window opens ${shortTime(weather.window_open_iso)}.`);
-    } else if (weather.state === "marginal") {
-      lines.push(`Weather marginal — flights at risk.`);
-    } else {
-      lines.push(`Weather window closed today.`);
-    }
+    lines.push(
+      `${weather.location}: ${weather.current.temp_f}°F ${weather.current.condition.toLowerCase()}; ${weather.headline.toLowerCase()}.`,
+    );
   }
 
-  const reports = data.get(toolKey(TOOL_NAMES.GET_CUSTOMER_REPORTS)) as
-    | CustomerReportsResult
+  // ── Messages: only mention if there are unread DMs. ──────────────
+  const messages = data.get(toolKey(TOOL_NAMES.MESSAGES_GET_RECENT)) as
+    | MessagesRecentResult
     | undefined;
-  if (reports) {
-    const unread = reports.reports.filter((r) => r.unread).length;
-    const high = reports.reports.filter((r) => r.priority === "high").length;
-    if (unread > 0) {
-      lines.push(
-        `${unread} unread customer report${unread === 1 ? "" : "s"}${high > 0 ? `; ${high} high priority` : ""}.`,
-      );
-    }
+  if (messages && messages.unread_count > 0) {
+    const conversations = messages.messages
+      .filter((m) => m.unread)
+      .slice(0, 2)
+      .map((m) => m.conversation)
+      .join(", ");
+    lines.push(
+      `${messages.unread_count} unread message${messages.unread_count === 1 ? "" : "s"} (${conversations}).`,
+    );
   }
 
+  // ── Watching: concerns we surface but can't address yet. ─────────
   if (layout.watching.length > 0) {
     const labels = layout.watching.map((w) => w.label.toLowerCase()).join("; ");
     lines.push(`Watching (no tool connected yet): ${labels}.`);
@@ -98,6 +113,7 @@ export function summarize(
 
   return { body: lines.join("\n\n"), refs };
 }
+
 function shortTime(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;

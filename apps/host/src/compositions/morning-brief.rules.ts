@@ -3,9 +3,9 @@
 // Each rule scans (user.md, agent.md) for a reason to fire. If matched,
 // it nominates a tool to call and a primitive to render. Importance
 // shapes order; higher = earlier in the layout. Operator user.md
-// preferences ("Anomalies before all-clears", "Maps and timelines over
-// tables") are encoded by the importance numbers below — keep them
-// auditable from this file alone.
+// preferences ("flagged email above the rest", "timelines and lists
+// over dense tables") are encoded by the importance numbers below —
+// keep them auditable from this file alone.
 //
 // Adding a new tool? Add a rule. Removing a domain? Remove the rule.
 // The composer engine in lib/composer.ts is intent-agnostic; only this
@@ -14,11 +14,13 @@
 import {
   TOOL_NAMES,
   UI_RESOURCE_URIS,
-  type AnomaliesResult,
-  type CustomerReportsResult,
-  type FleetStatusResult,
-  type TelemetryResult,
-  type WeatherWindow,
+  type CalendarTodayResult,
+  type DocsRecentResult,
+  type InboxBriefResult,
+  type MailThread,
+  type MessagesRecentResult,
+  type NewsFollowingResult,
+  type WeatherLocalResult,
 } from "@renderprotocol/protocol-types";
 import {
   bulletMentions,
@@ -29,66 +31,109 @@ import {
   type SlotTrace,
   type WatchingItem,
 } from "../lib/composer";
-import type { TimelineEvent, TimelineSeverity } from "../components/render-field/primitives/TimelineView";
+import type {
+  TimelineEvent,
+  TimelineSeverity,
+} from "../components/render-field/primitives/TimelineView";
 import type { AlertTone } from "../components/render-field/primitives/AlertView";
-import type { TabularColumn, TabularRow } from "../components/render-field/primitives/TabularView";
-import type { LiveSample } from "../components/render-field/primitives/LiveFeedView";
-
-const COMPOSITION = "morning-brief";
+import type {
+  TabularColumn,
+  TabularRow,
+} from "../components/render-field/primitives/TabularView";
 
 // Single source of truth for the keywords each rule searches for. Keeps
-// the rule body short and the matching transparent.
-const NEEDLES = {
-  fleet: ["drone", "fleet"],
-  weather: ["weather", "flight window"],
-  customers: ["customer", "report", "inbox", "communication"],
-  telemetry: ["telemetry", "hardware", "vibration"],
-} as const;
+// rule bodies short and the matching transparent. Explicit shape avoids
+// `noUncheckedIndexedAccess` widening to `string[] | undefined` at use.
+interface Needles {
+  mail: string[];
+  calendar: string[];
+  messages: string[];
+  news: string[];
+  weather: string[];
+  docs: string[];
+}
+const NEEDLES: Needles = {
+  mail: ["mail", "inbox", "email"],
+  calendar: ["calendar", "schedule", "event", "meeting"],
+  messages: ["message", "dm", "chat"],
+  news: ["news", "feed", "reading"],
+  weather: ["weather", "forecast"],
+  docs: ["doc", "document", "file"],
+};
 
 // ── Rules ────────────────────────────────────────────────────────────
 
-const fleetMapRule: Rule = {
-  id: "fleet-map",
-  primitive: "map",
-  tool: { name: TOOL_NAMES.GET_FLEET_STATUS },
-  importance: 0.9,
+// Action card: the most urgent flagged thread becomes a "Reply now?" card.
+// Domain-agnostic shape — same machinery would work for "approve this
+// purchase?" or "decline this meeting?" in another scenario.
+const urgentMailActionRule: Rule = {
+  id: "urgent-mail-action",
+  primitive: "action_card",
+  // Re-uses the inbox tool — the card's data comes from there. The
+  // composer dedupes the call with the mail-table rule below.
+  tool: { name: TOOL_NAMES.MAIL_GET_INBOX },
+  importance: 0.97, // Top of the brief — actions need attention.
   matches(ctx) {
-    const sc = findStandingConcern(ctx.user, NEEDLES.fleet);
+    const sc = findStandingConcern(ctx.user, NEEDLES.mail);
     if (sc) return userTrace("Standing concerns", sc);
-    const ad = findAgentDefault(ctx.agent, NEEDLES.fleet);
+    const ad = findAgentDefault(ctx.agent, NEEDLES.mail);
     if (ad) return agentTrace("Defaults", ad);
     return null;
   },
   buildProps(data) {
-    const fleet = data as FleetStatusResult | undefined;
-    return { data: fleet ?? { generated_at_iso: "", drones: [] } };
+    const inbox = data as InboxBriefResult | undefined;
+    const target =
+      inbox?.flagged.find((t) => t.flag === "urgent" && t.unread) ??
+      inbox?.flagged.find((t) => t.unread);
+    if (!target) {
+      return { _skip: true };
+    }
+    return {
+      action_id: `mail-reply/${target.thread_id}`,
+      headline: `Reply to ${target.from_name}?`,
+      detail: target.subject,
+      meta: {
+        flag: target.flag ?? "unread",
+        received: target.received_iso,
+      },
+      confidence: 0.7,
+      payload: {
+        thread_id: target.thread_id,
+        from_email: target.from_email,
+      },
+      approve_label: "Draft reply",
+      reject_label: "Not now",
+    };
   },
 };
 
-const anomaliesRule: Rule = {
-  id: "anomalies-timeline",
+const calendarTimelineRule: Rule = {
+  id: "calendar-timeline",
   primitive: "timeline",
-  tool: { name: TOOL_NAMES.GET_ANOMALIES },
-  // user.md says "Anomalies before all-clears" — anomalies sit above the
-  // fleet map and the weather indicator unless either fires for a more
-  // urgent reason. Importance reflects that.
-  importance: 0.95,
+  tool: { name: TOOL_NAMES.CALENDAR_GET_TODAY },
+  importance: 0.85,
   matches(ctx) {
-    const sc = findStandingConcern(ctx.user, ["hardware", "anomal"]);
+    const sc = findStandingConcern(ctx.user, NEEDLES.calendar);
     if (sc) return userTrace("Standing concerns", sc);
-    const ad = findAgentDefault(ctx.agent, ["anomal"]);
+    const ad = findAgentDefault(ctx.agent, NEEDLES.calendar);
     if (ad) return agentTrace("Defaults", ad);
     return null;
   },
   buildProps(data) {
-    const anoms = data as AnomaliesResult | undefined;
-    const events: TimelineEvent[] = (anoms?.events ?? []).map((e) => ({
-      id: e.id,
-      ts_iso: e.ts_iso,
+    const cal = data as CalendarTodayResult | undefined;
+    const events: TimelineEvent[] = (cal?.events ?? []).map((e) => ({
+      id: e.event_id,
+      ts_iso: e.start_iso,
       title: e.title,
-      body: e.detail,
-      severity: severityToTimeline(e.severity),
-      meta: { drone: e.drone_id, kind: e.kind },
+      ...(e.location ? { body: e.location } : {}),
+      severity: eventSeverity(e.status, e.prep_status),
+      meta: {
+        ...(e.attendees.length > 0
+          ? { with: e.attendees.filter((a) => a !== "you").join(", ") }
+          : {}),
+        ...(e.prep_status === "needs_prep" ? { prep: "needs prep" } : {}),
+        status: e.status,
+      },
     }));
     return { events };
   },
@@ -97,10 +142,9 @@ const anomaliesRule: Rule = {
 const weatherAlertRule: Rule = {
   id: "weather-alert",
   primitive: "alert",
-  tool: { name: TOOL_NAMES.GET_WEATHER_WINDOW },
-  importance: 0.7,
+  tool: { name: TOOL_NAMES.WEATHER_GET_LOCAL },
+  importance: 0.75,
   matches(ctx) {
-    // Either explicit user concern OR an agent-default mentioning weather.
     const sc = findStandingConcern(ctx.user, NEEDLES.weather);
     if (sc) return userTrace("Standing concerns", sc);
     const ad = findAgentDefault(ctx.agent, NEEDLES.weather);
@@ -108,164 +152,160 @@ const weatherAlertRule: Rule = {
     return null;
   },
   buildProps(data) {
-    const w = data as WeatherWindow | undefined;
-    if (!w) return { headline: "Weather window unavailable", tone: "neutral" as AlertTone };
+    const w = data as WeatherLocalResult | undefined;
+    if (!w) {
+      return {
+        headline: "Weather unavailable",
+        tone: "neutral" as AlertTone,
+      };
+    }
     const tone: AlertTone =
-      w.state === "open" ? "ok" : w.state === "marginal" ? "warn" : "critical";
+      w.alert_level === "critical"
+        ? "critical"
+        : w.alert_level === "warn"
+          ? "warn"
+          : "ok";
     return {
       tone,
-      headline:
-        w.state === "open"
-          ? "Weather window open"
-          : w.state === "marginal"
-            ? "Weather window marginal"
-            : "Weather window closed",
-      detail: w.conditions,
+      headline: w.headline,
+      detail: `${w.location} — ${w.current.temp_f}°F ${w.current.condition.toLowerCase()}`,
       meta: {
-        opens: shortTime(w.window_open_iso),
-        closes: shortTime(w.window_close_iso),
-        score: `${Math.round(w.score * 100)}%`,
+        high: `${w.high_f}°`,
+        low: `${w.low_f}°`,
+        wind: `${w.current.wind_mph} mph`,
+        humidity: `${w.current.humidity_pct}%`,
       },
     };
   },
 };
 
-const customerReportsRule: Rule = {
-  id: "customer-reports-table",
+const mailTableRule: Rule = {
+  id: "mail-table",
   primitive: "table",
-  tool: { name: TOOL_NAMES.GET_CUSTOMER_REPORTS },
-  // user.md says "maps and timelines over tables when possible" — table
-  // sits below the visual primitives. Surfaces if the agent contract or
-  // user concerns mention customers/reports/communication.
-  importance: 0.4,
+  tool: { name: TOOL_NAMES.MAIL_GET_INBOX },
+  importance: 0.65,
   matches(ctx) {
-    const sc = findStandingConcern(ctx.user, NEEDLES.customers);
+    const sc = findStandingConcern(ctx.user, NEEDLES.mail);
     if (sc) return userTrace("Standing concerns", sc);
-    const ad = findAgentDefault(ctx.agent, NEEDLES.customers);
+    const ad = findAgentDefault(ctx.agent, NEEDLES.mail);
     if (ad) return agentTrace("Defaults", ad);
     return null;
   },
   buildProps(data) {
-    const r = data as CustomerReportsResult | undefined;
+    const inbox = data as InboxBriefResult | undefined;
     const columns: TabularColumn[] = [
-      { key: "customer", label: "Customer" },
+      { key: "from", label: "From" },
       { key: "subject", label: "Subject" },
-      { key: "priority", label: "Priority", type: "priority" },
-      { key: "ts_iso", label: "Received", type: "timestamp", align: "right" },
+      { key: "flag", label: "Flag", type: "priority" },
+      { key: "received_iso", label: "Received", type: "timestamp", align: "right" },
     ];
-    const rows: TabularRow[] = (r?.reports ?? []).map((row) => ({
-      id: row.id,
-      customer: row.unread ? `${row.customer} •` : row.customer,
-      subject: row.subject,
-      priority: row.priority,
-      ts_iso: row.ts_iso,
+    const rows: TabularRow[] = mergeMailRows(inbox);
+    return { columns, rows };
+  },
+};
+
+const messagesTableRule: Rule = {
+  id: "messages-table",
+  primitive: "table",
+  tool: { name: TOOL_NAMES.MESSAGES_GET_RECENT },
+  importance: 0.55,
+  matches(ctx) {
+    const sc = findStandingConcern(ctx.user, NEEDLES.messages);
+    if (sc) return userTrace("Standing concerns", sc);
+    const ad = findAgentDefault(ctx.agent, NEEDLES.messages);
+    if (ad) return agentTrace("Defaults", ad);
+    return null;
+  },
+  buildProps(data) {
+    const r = data as MessagesRecentResult | undefined;
+    const columns: TabularColumn[] = [
+      { key: "channel", label: "App", type: "muted-text" },
+      { key: "conversation", label: "Conversation" },
+      { key: "preview", label: "Preview", type: "muted-text" },
+      { key: "received_iso", label: "Received", type: "timestamp", align: "right" },
+    ];
+    const rows: TabularRow[] = (r?.messages ?? []).map((m) => ({
+      id: m.message_id,
+      channel: m.channel,
+      conversation: m.unread ? `${m.conversation} •` : m.conversation,
+      preview: m.preview,
+      received_iso: m.received_iso,
     }));
     return { columns, rows };
   },
 };
 
-const telemetryFeedRule: Rule = {
-  id: "drone-7-vibration",
-  primitive: "live_feed",
-  // The hardware-health concern in user.md tags drone hardware specifically;
-  // we surface drone-7's vibration as the live signal because anomaly fixture
-  // flags it as the warn-level event. When the anomaly tool returns
-  // different drones, this rule should follow — handled here by reading the
-  // anomaly result through `args` once that wire is in place.
-  tool: { name: TOOL_NAMES.GET_DRONE_TELEMETRY, args: { drone_id: "drone-7", range_seconds: 60 } },
-  importance: 0.55,
+const newsTimelineRule: Rule = {
+  id: "news-timeline",
+  primitive: "timeline",
+  tool: { name: TOOL_NAMES.NEWS_GET_FOLLOWING },
+  importance: 0.45,
   matches(ctx) {
-    const sc = findStandingConcern(ctx.user, NEEDLES.telemetry);
+    const sc = findStandingConcern(ctx.user, NEEDLES.news);
     if (sc) return userTrace("Standing concerns", sc);
-    return null;
-  },
-  buildProps(data) {
-    const t = data as TelemetryResult | undefined;
-    const drone_id = t?.drone_id ?? "drone-7";
-    const samples: LiveSample[] = (t?.samples ?? []).map((s) => ({
-      ts_ms: new Date(s.ts_iso).getTime(),
-      value: s.vibration_g,
-    }));
-    return {
-      entity: `${drone_id}/vibration`,
-      label: `${drone_id} vibration`,
-      unit: "g",
-      samples,
-      // Server-pushed updates flow in through the notifications bridge
-      // and append to the chart in real time. Topic shape is the same
-      // string the mock server emits in `notifications/renderprotocol/
-      // data_updated` { topic, payload }.
-      subscribeTopic: `telemetry/${drone_id}`,
-      threshold: { warn: 1.2, critical: 1.6 },
-    };
-  },
-};
-
-// ── ActionCard rule ────────────────────────────────────────────────
-// Generic shape: when a high-priority customer report is unread, surface
-// an Approve/Reject card. Domain-agnostic: substitute "high-priority
-// support email" or "calendar conflict" or "purchase confirmation" and
-// the same rule shape works.
-
-const highPriorityActionRule: Rule = {
-  id: "high-priority-action",
-  primitive: "action_card",
-  // Re-uses the customer reports tool — the card's data comes from there.
-  // No need to fan out a separate fetch.
-  tool: { name: TOOL_NAMES.GET_CUSTOMER_REPORTS },
-  importance: 0.97, // Sits at the top — actions need attention.
-  matches(ctx) {
-    // Fires for any agent that lists customer/report concerns. Generic
-    // enough to apply to consumer agent.md too (e.g. "reply to messages")
-    const sc = findStandingConcern(ctx.user, NEEDLES.customers);
-    if (sc) return userTrace("Standing concerns", sc);
-    const ad = findAgentDefault(ctx.agent, NEEDLES.customers);
+    const ad = findAgentDefault(ctx.agent, NEEDLES.news);
     if (ad) return agentTrace("Defaults", ad);
     return null;
   },
   buildProps(data) {
-    const r = data as CustomerReportsResult | undefined;
-    const target = r?.reports.find((row) => row.unread && row.priority === "high");
-    if (!target) {
-      // Pure "no action right now" — return a sentinel the dispatcher
-      // can hide. Returning empty props would still render a blank
-      // card; we use `_skip` so the slot dispatcher elides it.
-      return { _skip: true };
-    }
-    return {
-      action_id: `reply/${target.id}`,
-      headline: `Reply to ${target.customer}?`,
-      detail: target.subject,
+    const n = data as NewsFollowingResult | undefined;
+    const events: TimelineEvent[] = (n?.items ?? []).map((item) => ({
+      id: item.item_id,
+      ts_iso: item.published_iso,
+      title: item.title,
+      body: item.summary,
+      severity: "info",
       meta: {
-        priority: target.priority,
-        received: target.ts_iso,
+        source: item.source,
+        ...(item.topics.length > 0 ? { topics: item.topics.join(", ") } : {}),
       },
-      confidence: 0.7,
-      payload: {
-        report_id: target.id,
-        customer: target.customer,
-      },
-      approve_label: "Draft reply",
-      reject_label: "Not now",
-    };
+    }));
+    return { events };
+  },
+};
+
+const docsTableRule: Rule = {
+  id: "docs-table",
+  primitive: "table",
+  tool: { name: TOOL_NAMES.DOCS_GET_RECENT },
+  importance: 0.35,
+  matches(ctx) {
+    const sc = findStandingConcern(ctx.user, NEEDLES.docs);
+    if (sc) return userTrace("Standing concerns", sc);
+    const ad = findAgentDefault(ctx.agent, NEEDLES.docs);
+    if (ad) return agentTrace("Defaults", ad);
+    return null;
+  },
+  buildProps(data) {
+    const d = data as DocsRecentResult | undefined;
+    const columns: TabularColumn[] = [
+      { key: "source", label: "Source", type: "muted-text" },
+      { key: "title", label: "Title" },
+      { key: "shared_with", label: "Shared", type: "muted-text" },
+      { key: "edited_iso", label: "Edited", type: "timestamp", align: "right" },
+    ];
+    const rows: TabularRow[] = (d?.docs ?? []).map((doc) => ({
+      id: doc.doc_id,
+      source: docSourceLabel(doc.source),
+      title: doc.title,
+      shared_with: doc.shared_with.length > 0 ? doc.shared_with.join(", ") : "—",
+      edited_iso: doc.edited_iso,
+    }));
+    return { columns, rows };
   },
 };
 
 // ── MCP App slot ───────────────────────────────────────────────────
 // Demonstrates that the composer can include a SEP-1865 ui:// resource
 // alongside structured-data primitives. The resource itself is the
-// minimal hello sandbox — same one used in the step-2 showcase. Real
-// domain ui:// resources land when an agent.md asks for them.
-
+// minimal hello sandbox — kept on through the scenario pivot so the
+// iframe path stays exercised.
 const mcpAppSlotRule: Rule = {
   id: "mcp-app-hello",
   primitive: "mcp_app",
-  tool: null, // ui:// resources are fetched by the McpAppFrame itself, not by the composer.
-  importance: 0.05, // Below everything substantive — this is a wire test.
+  tool: null,
+  importance: 0.05,
   matches(ctx) {
-    // Fires whenever an agent is loaded. Removable via agent.md without
-    // editing this file: a future "## Render extensions" section can
-    // gate it. For v0 it's always on so the iframe path stays exercised.
     if (ctx.agent) {
       return {
         reason: "MCP App slot — hello sandbox",
@@ -284,12 +324,13 @@ const mcpAppSlotRule: Rule = {
 };
 
 export const MORNING_BRIEF_RULES: Rule[] = [
-  highPriorityActionRule,
-  anomaliesRule,
-  fleetMapRule,
+  urgentMailActionRule,
+  calendarTimelineRule,
   weatherAlertRule,
-  telemetryFeedRule,
-  customerReportsRule,
+  mailTableRule,
+  messagesTableRule,
+  newsTimelineRule,
+  docsTableRule,
   mcpAppSlotRule,
 ];
 
@@ -301,7 +342,10 @@ export const MORNING_BRIEF_RULES: Rule[] = [
  * corresponding tool — surface them as "watching, no tool connected" so
  * the system feels honest about its blind spots.
  */
-export function morningBriefWatching(ctx: ComposeContext, covered: Set<string>): WatchingItem[] {
+export function morningBriefWatching(
+  ctx: ComposeContext,
+  covered: Set<string>,
+): WatchingItem[] {
   const out: WatchingItem[] = [];
   if (!ctx.user) return out;
   for (const concern of ctx.user.typed.standing_concerns) {
@@ -314,7 +358,7 @@ export function morningBriefWatching(ctx: ComposeContext, covered: Set<string>):
   return out;
 }
 
-// ── trace + helper utilities ────────────────────────────────────────
+// ── helpers ─────────────────────────────────────────────────────────
 
 function userTrace(section: string, bullet: string): SlotTrace {
   return {
@@ -330,16 +374,46 @@ function agentTrace(section: string, bullet: string): SlotTrace {
   };
 }
 
-function severityToTimeline(s: AnomaliesResult["events"][number]["severity"]): TimelineSeverity {
-  if (s === "warn") return "warn";
-  if (s === "critical") return "critical";
+function eventSeverity(
+  status: CalendarTodayResult["events"][number]["status"],
+  prep: CalendarTodayResult["events"][number]["prep_status"],
+): TimelineSeverity {
+  if (status === "in_progress") return "ok";
+  if (prep === "needs_prep") return "warn";
   return "info";
 }
 
-function shortTime(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+function mergeMailRows(inbox: InboxBriefResult | undefined): TabularRow[] {
+  if (!inbox) return [];
+  const seen = new Set<string>();
+  const ordered: MailThread[] = [];
+  for (const t of [...inbox.flagged, ...inbox.recent_unread]) {
+    if (seen.has(t.thread_id)) continue;
+    seen.add(t.thread_id);
+    ordered.push(t);
+  }
+  return ordered.map((t) => ({
+    id: t.thread_id,
+    from: t.unread ? `${t.from_name} •` : t.from_name,
+    subject: t.subject,
+    // Map mail flags onto the table's priority column. "urgent" → high,
+    // "important" → normal, "starred" → low; null → empty cell.
+    flag: t.flag === "urgent" ? "high" : t.flag === "important" ? "normal" : t.flag === "starred" ? "low" : "",
+    received_iso: t.received_iso,
+  }));
+}
+
+function docSourceLabel(s: DocsRecentResult["docs"][number]["source"]): string {
+  switch (s) {
+    case "google_docs":
+      return "Docs";
+    case "notion":
+      return "Notion";
+    case "github":
+      return "GitHub";
+    case "local":
+      return "Local";
+  }
 }
 
 // Re-export the helper so callers can inspect what matched without

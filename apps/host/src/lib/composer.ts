@@ -14,7 +14,6 @@ import type { ParsedDoc } from "./config";
 // ── Types the renderer cares about ───────────────────────────────────
 
 export type PrimitiveKind =
-  | "map"
   | "timeline"
   | "alert"
   | "narrative"
