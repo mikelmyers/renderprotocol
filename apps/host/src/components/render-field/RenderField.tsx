@@ -1,9 +1,8 @@
 import { useEffect, useState } from "react";
-import type { FleetStatusResult } from "@renderprotocol/protocol-types";
+import { TOOL_NAMES } from "@renderprotocol/protocol-types";
 import { ipc } from "../../lib/ipc";
 import { useComposition } from "../../lib/use-composition";
 import type { LayoutSpec, SlotSpec, TraceSource, WatchingItem } from "../../lib/composer";
-import { MapView } from "./primitives/MapView";
 import { TimelineView, type TimelineEvent } from "./primitives/TimelineView";
 import { AlertView, type AlertAction, type AlertTone } from "./primitives/AlertView";
 import { TabularView, type TabularColumn, type TabularRow } from "./primitives/TabularView";
@@ -138,7 +137,6 @@ function Watching({ items }: { items: WatchingItem[] }) {
 
 // ── Slot dispatcher ──────────────────────────────────────────────────
 
-interface MapProps { data: FleetStatusResult }
 interface TimelineProps { events: TimelineEvent[] }
 interface AlertProps {
   tone: AlertTone;
@@ -169,19 +167,19 @@ interface McpAppSlotProps {
 }
 
 function renderSlot(slot: SlotSpec): React.ReactNode {
+  // Each `as unknown as XxxProps` cast bypasses TS's two-way overlap check
+  // — slot.props is the engine's `Record<string, unknown>` bag, populated
+  // by the rule's buildProps. The dispatcher trusts the rule/primitive
+  // contract authored alongside it.
   switch (slot.primitive) {
-    case "map": {
-      const p = slot.props as MapProps;
-      return <MapView composition={slot.id} source_tool={slot.source_tool} data={p.data} />;
-    }
     case "timeline": {
-      const p = slot.props as TimelineProps;
+      const p = slot.props as unknown as TimelineProps;
       return (
         <TimelineView composition={slot.id} source_tool={slot.source_tool} events={p.events} />
       );
     }
     case "alert": {
-      const p = slot.props as AlertProps;
+      const p = slot.props as unknown as AlertProps;
       return (
         <AlertView
           composition={slot.id}
@@ -196,7 +194,7 @@ function renderSlot(slot: SlotSpec): React.ReactNode {
       );
     }
     case "table": {
-      const p = slot.props as TableProps;
+      const p = slot.props as unknown as TableProps;
       return (
         <TabularView
           composition={slot.id}
@@ -207,7 +205,7 @@ function renderSlot(slot: SlotSpec): React.ReactNode {
       );
     }
     case "live_feed": {
-      const p = slot.props as LiveFeedProps;
+      const p = slot.props as unknown as LiveFeedProps;
       return (
         <LiveFeedView
           composition={slot.id}
@@ -222,7 +220,7 @@ function renderSlot(slot: SlotSpec): React.ReactNode {
       );
     }
     case "action_card": {
-      const p = slot.props as ActionCardSlotProps;
+      const p = slot.props as unknown as ActionCardSlotProps;
       return (
         <ActionCard
           composition={slot.id}
@@ -241,7 +239,7 @@ function renderSlot(slot: SlotSpec): React.ReactNode {
       );
     }
     case "mcp_app": {
-      const p = slot.props as McpAppSlotProps;
+      const p = slot.props as unknown as McpAppSlotProps;
       return (
         <McpAppFrame
           composition={slot.id}
@@ -262,23 +260,31 @@ function renderSlot(slot: SlotSpec): React.ReactNode {
 }
 
 function titleFor(slot: SlotSpec): string {
+  // Service label by source_tool — the most natural framing for the
+  // brief, since each "service" backs one or more slots.
+  switch (slot.source_tool) {
+    case TOOL_NAMES.MAIL_GET_INBOX:
+      return slot.primitive === "action_card" ? "Suggested reply" : "Mail";
+    case TOOL_NAMES.CALENDAR_GET_TODAY:
+      return "Calendar";
+    case TOOL_NAMES.MESSAGES_GET_RECENT:
+      return "Messages";
+    case TOOL_NAMES.NEWS_GET_FOLLOWING:
+      return "News";
+    case TOOL_NAMES.WEATHER_GET_LOCAL:
+      return "Weather";
+    case TOOL_NAMES.DOCS_GET_RECENT:
+      return "Docs";
+  }
   switch (slot.primitive) {
-    case "map":
-      return "Fleet";
-    case "timeline":
-      return "Anomalies";
-    case "alert":
-      return "Indicator";
-    case "table":
-      return "Customer reports";
-    case "live_feed":
-      return "Live signal";
-    case "narrative":
-      return "Narrative";
     case "mcp_app":
       return "MCP app";
+    case "narrative":
+      return "Narrative";
     case "action_card":
       return "Suggested action";
+    default:
+      return slot.primitive;
   }
 }
 

@@ -1,0 +1,264 @@
+{
+  "user": {
+    "name": "Riley",
+    "location": "Brooklyn, NY"
+  },
+  "mail": {
+    "extra_unread_count": 9,
+    "flagged": [
+      {
+        "thread_id": "thr_8a21",
+        "subject": "Contract review — final round",
+        "from_name": "Dana Liu",
+        "from_email": "dana@northstar-legal.com",
+        "preview": "Sending the redlined draft. Two open points on indemnity that need your call before Thursday.",
+        "received_offset_s": -5400,
+        "unread": true,
+        "flag": "urgent"
+      },
+      {
+        "thread_id": "thr_8a22",
+        "subject": "Re: speaking slot — confirming Thursday",
+        "from_name": "Jorge Mensah",
+        "from_email": "jorge@theroundtable.org",
+        "preview": "Locking in 4:30. Can you send a 100-word bio + headshot today?",
+        "received_offset_s": -10800,
+        "unread": true,
+        "flag": "important"
+      }
+    ],
+    "recent_unread": [
+      {
+        "thread_id": "thr_8a23",
+        "subject": "Your invoice INV-1184 was paid",
+        "from_name": "Stripe",
+        "from_email": "no-reply@stripe.com",
+        "preview": "$4,200.00 from Helix Labs cleared and is on its way to your bank.",
+        "received_offset_s": -1800,
+        "unread": true,
+        "flag": null
+      },
+      {
+        "thread_id": "thr_8a24",
+        "subject": "weekly digest — 12 things from your reading list",
+        "from_name": "Readwise",
+        "from_email": "team@readwise.io",
+        "preview": "Highlights from Stratechery, LessWrong, and three new titles you saved last week.",
+        "received_offset_s": -3600,
+        "unread": true,
+        "flag": null
+      },
+      {
+        "thread_id": "thr_8a25",
+        "subject": "Mom — quick favor this weekend?",
+        "from_name": "Mom",
+        "from_email": "ellen.parker@gmail.com",
+        "preview": "Could you and Sam pick up the platters from Fairway around 11? I'll handle the rest.",
+        "received_offset_s": -7200,
+        "unread": true,
+        "flag": "starred"
+      }
+    ]
+  },
+  "calendar": {
+    "events": [
+      {
+        "event_id": "evt_201",
+        "title": "Standup",
+        "start_offset_s": 1800,
+        "duration_s": 1500,
+        "location": "Zoom",
+        "attendees": ["Mira", "Tomás", "Priya", "you"],
+        "prep_status": "ready"
+      },
+      {
+        "event_id": "evt_202",
+        "title": "1:1 with Dana — contract review",
+        "start_offset_s": 9000,
+        "duration_s": 1800,
+        "location": "Zoom",
+        "attendees": ["Dana Liu", "you"],
+        "prep_status": "needs_prep"
+      },
+      {
+        "event_id": "evt_203",
+        "title": "Lunch w/ Sam",
+        "start_offset_s": 14400,
+        "duration_s": 3600,
+        "location": "Café Mogador",
+        "attendees": ["Sam", "you"],
+        "prep_status": "none"
+      },
+      {
+        "event_id": "evt_204",
+        "title": "Roundtable — speaking slot",
+        "start_offset_s": 28800,
+        "duration_s": 2700,
+        "location": "Cooper Union, 7 E 7th St",
+        "attendees": ["Jorge Mensah", "you"],
+        "prep_status": "needs_prep"
+      }
+    ]
+  },
+  "messages": {
+    "messages": [
+      {
+        "message_id": "msg_501",
+        "channel": "imessage",
+        "conversation": "Sam",
+        "preview": "still on for lunch? I might be 10 min late",
+        "received_offset_s": -600,
+        "unread": true
+      },
+      {
+        "message_id": "msg_502",
+        "channel": "slack",
+        "conversation": "#design-review",
+        "preview": "Mira: pushed v3 of the onboarding flow — would love your eyes before EOD",
+        "received_offset_s": -1500,
+        "unread": true
+      },
+      {
+        "message_id": "msg_503",
+        "channel": "slack",
+        "conversation": "Tomás",
+        "preview": "the staging deploy is green, ready when you are",
+        "received_offset_s": -2700,
+        "unread": true
+      },
+      {
+        "message_id": "msg_504",
+        "channel": "signal",
+        "conversation": "Alex Rivera",
+        "preview": "saw your post — let's grab coffee next week, my treat",
+        "received_offset_s": -7200,
+        "unread": false
+      },
+      {
+        "message_id": "msg_505",
+        "channel": "whatsapp",
+        "conversation": "Family",
+        "preview": "Mom: don't forget the platters",
+        "received_offset_s": -7800,
+        "unread": false
+      },
+      {
+        "message_id": "msg_506",
+        "channel": "discord",
+        "conversation": "indie-builders",
+        "preview": "marina: anyone tried the new Anthropic batch API for grading? curious how it scales",
+        "received_offset_s": -10800,
+        "unread": false
+      }
+    ]
+  },
+  "news": {
+    "items": [
+      {
+        "item_id": "nws_701",
+        "source": "Stratechery",
+        "title": "The Agent-Native Interface",
+        "summary": "Ben Thompson on why composing UI from structured data — rather than templating it — is the inevitable shape of the next interface layer.",
+        "url": "https://stratechery.com/2026/the-agent-native-interface",
+        "published_offset_s": -14400,
+        "topics": ["agents", "ui", "platforms"]
+      },
+      {
+        "item_id": "nws_702",
+        "source": "Hacker News",
+        "title": "Show HN: A render protocol for MCP-driven UIs",
+        "summary": "143 points · 41 comments. Discussion of a prototype that composes views from MCP tool results in real time.",
+        "url": "https://news.ycombinator.com/item?id=42000001",
+        "published_offset_s": -21600,
+        "topics": ["mcp", "agents", "show-hn"]
+      },
+      {
+        "item_id": "nws_703",
+        "source": "The Verge",
+        "title": "Major browser vendors begin shipping native MCP host APIs",
+        "summary": "Chrome and Safari announce experimental flags exposing local MCP-server registration to web apps.",
+        "url": "https://theverge.com/2026/05/02/browser-mcp-native",
+        "published_offset_s": -28800,
+        "topics": ["browsers", "mcp", "platforms"]
+      },
+      {
+        "item_id": "nws_704",
+        "source": "Substack — Working Theory",
+        "title": "Notes on a quiet interface",
+        "summary": "An argument for composition-first surfaces that stay out of the user's way until they have something worth saying.",
+        "url": "https://workingtheory.substack.com/p/notes-on-a-quiet-interface",
+        "published_offset_s": -36000,
+        "topics": ["design", "calm-tech"]
+      },
+      {
+        "item_id": "nws_705",
+        "source": "Bloomberg",
+        "title": "Ten-year yields back below 4% as inflation prints cooler than expected",
+        "summary": "Markets reprice the rate path; tech leads the rebound.",
+        "url": "https://bloomberg.com/news/2026-05-02/yields-cool",
+        "published_offset_s": -7200,
+        "topics": ["markets", "macro"]
+      }
+    ]
+  },
+  "weather": {
+    "location": "Brooklyn, NY",
+    "headline": "Clear now, light rain after lunch",
+    "alert_level": "warn",
+    "current": {
+      "temp_f": 61,
+      "feels_like_f": 60,
+      "condition": "Clear",
+      "humidity_pct": 52,
+      "wind_mph": 6
+    },
+    "forecast_hourly": [
+      { "hour_offset_s": 3600,  "temp_f": 64, "condition": "Clear",         "precip_pct": 0 },
+      { "hour_offset_s": 7200,  "temp_f": 67, "condition": "Mostly Sunny",  "precip_pct": 0 },
+      { "hour_offset_s": 10800, "temp_f": 70, "condition": "Partly Cloudy", "precip_pct": 5 },
+      { "hour_offset_s": 14400, "temp_f": 72, "condition": "Partly Cloudy", "precip_pct": 10 },
+      { "hour_offset_s": 18000, "temp_f": 71, "condition": "Cloudy",        "precip_pct": 20 },
+      { "hour_offset_s": 21600, "temp_f": 68, "condition": "Light Rain",    "precip_pct": 55 },
+      { "hour_offset_s": 25200, "temp_f": 65, "condition": "Light Rain",    "precip_pct": 60 },
+      { "hour_offset_s": 28800, "temp_f": 62, "condition": "Cloudy",        "precip_pct": 30 }
+    ],
+    "high_f": 72,
+    "low_f": 58
+  },
+  "docs": {
+    "docs": [
+      {
+        "doc_id": "doc_301",
+        "source": "notion",
+        "title": "Q2 plan — draft",
+        "preview": "Three priorities: ship the v0 surface, lock the carrier-layer thesis, hire the second engineer.",
+        "edited_offset_s": -1200,
+        "shared_with": ["Mira", "Tomás"]
+      },
+      {
+        "doc_id": "doc_302",
+        "source": "google_docs",
+        "title": "Roundtable talk — outline",
+        "preview": "Hook → why composition over templates → the agent.md substrate → demo → call to action.",
+        "edited_offset_s": -3600,
+        "shared_with": ["Jorge Mensah"]
+      },
+      {
+        "doc_id": "doc_303",
+        "source": "github",
+        "title": "renderprotocol/STRUCTURE.md",
+        "preview": "Locked v0 directory layout, bus event taxonomy, and tombstoning rules for element references.",
+        "edited_offset_s": -86400,
+        "shared_with": []
+      },
+      {
+        "doc_id": "doc_304",
+        "source": "local",
+        "title": "thinking — what is the agent-internet, really",
+        "preview": "Notes-to-self on whether the carrier layer is a marketplace, a directory, or something else entirely.",
+        "edited_offset_s": -172800,
+        "shared_with": []
+      }
+    ]
+  }
+}
