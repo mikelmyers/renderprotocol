@@ -31,7 +31,7 @@
 //                             full re-exploration).
 //   Any         → Forfeit:    only via manual admin command in v0.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Minimum count of total exploration calls (successes + failures)
 /// before promotion is even considered. Rules out lucky-streak agents:
@@ -77,7 +77,7 @@ pub const TIER1_RECOVERY_DURATION_MS: i64 = 48 * 3600 * 1000;
 /// v0 default. `Suspended` agents are NOT eligible for this allocation.
 pub const EXPLORATION_ALLOCATION_FRACTION: f64 = 0.02;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum AgentLifecycle {
     /// New agent earning trust through bounded exposure. Receipts from
@@ -177,7 +177,7 @@ impl AgentLifecycle {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ForfeitReason {
     /// Sybil-topology score categorically tripped (5c): cryptographic

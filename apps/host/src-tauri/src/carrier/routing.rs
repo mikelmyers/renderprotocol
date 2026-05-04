@@ -223,15 +223,36 @@ impl RoutingCarrier {
         for spec in &specs {
             let _ = keys.ensure_keypair(&spec.id, now_ms);
         }
+        // Lifecycle hydration: load any persisted state. Agents with no
+        // persisted record fall through to AgentLifecycle::initial. This
+        // is the load side of the write-through pair that makes Forfeit
+        // (and Suspended, and exploration counters) survive restart.
+        let persisted_lifecycles: HashMap<String, AgentLifecycle> = if hydrate {
+            match storage.load_all_lifecycles() {
+                Ok(m) => m,
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to load lifecycles on boot; using initial states");
+                    HashMap::new()
+                }
+            }
+        } else {
+            HashMap::new()
+        };
         let agents: Vec<HostingAgent> = specs
             .into_iter()
-            .map(|s| HostingAgent {
-                id: s.id.clone(),
-                endpoint: s.endpoint.clone(),
-                client: Arc::new(McpClient::new(s.endpoint.clone())),
-                state: Arc::new(RwLock::new(McpConnectionState::Connecting)),
-                lifecycle: Arc::new(RwLock::new(AgentLifecycle::initial(s.seed, now_ms))),
-                spec: s,
+            .map(|s| {
+                let lifecycle = persisted_lifecycles
+                    .get(&s.id)
+                    .cloned()
+                    .unwrap_or_else(|| AgentLifecycle::initial(s.seed, now_ms));
+                HostingAgent {
+                    id: s.id.clone(),
+                    endpoint: s.endpoint.clone(),
+                    client: Arc::new(McpClient::new(s.endpoint.clone())),
+                    state: Arc::new(RwLock::new(McpConnectionState::Connecting)),
+                    lifecycle: Arc::new(RwLock::new(lifecycle)),
+                    spec: s,
+                }
             })
             .collect();
         let mut receipts = ReceiptStore::new();
@@ -641,109 +662,125 @@ impl RoutingCarrier {
             )
         };
 
-        let mut life = agent.lifecycle.write();
+        // Compute the new state under the write guard, then persist
+        // the snapshot outside the guard. The branches are mutually
+        // exclusive: Tier 1 trip fires from Exploration/Production
+        // only (Suspended is not routable); Tier 1 recovery fires from
+        // Suspended only; exploration accounting fires from Exploration
+        // only. else-if chain enforces single-branch entry per call.
+        let snapshot: AgentLifecycle = {
+            let mut life = agent.lifecycle.write();
 
-        // Tier 1 trip: any routable state with AR below the threshold
-        // moves to Suspended. This applies to both Exploration and
-        // Production — research consensus is that established agents
-        // also benefit from soft-suspend on adversarial signals.
-        if life.is_routable() && current_ar < TIER1_SUSPEND_AR_THRESHOLD {
-            tracing::warn!(
-                agent = %agent.id,
-                ar = current_ar,
-                "Tier 1 suspension: AR below threshold"
-            );
-            *life = AgentLifecycle::Suspended {
-                since_ms: now_ms,
-                ar_at_suspension: current_ar,
-                ar_recovery_started_ms: None,
-            };
-            return;
-        }
-
-        // Tier 1 recovery: Suspended agents resume when AR has been
-        // above the recovery threshold for the recovery duration.
-        if let AgentLifecycle::Suspended {
-            since_ms,
-            ar_at_suspension,
-            ar_recovery_started_ms,
-        } = *life
-        {
-            if current_ar >= TIER1_RECOVERY_AR_THRESHOLD {
-                let started = ar_recovery_started_ms.unwrap_or(now_ms);
-                if now_ms - started >= TIER1_RECOVERY_DURATION_MS {
-                    tracing::info!(
-                        agent = %agent.id,
-                        ar = current_ar,
-                        "Tier 1 recovery: resuming to Exploration with reset counters"
-                    );
-                    *life = AgentLifecycle::Exploration {
-                        successes_so_far: 0,
-                        failures_so_far: 0,
-                        entered_at_ms: now_ms,
-                        min_ar_observed: 1.0,
-                    };
+            if life.is_routable() && current_ar < TIER1_SUSPEND_AR_THRESHOLD {
+                // Tier 1 trip: any routable state with AR below the
+                // threshold moves to Suspended. Applies to Production
+                // too — research consensus is that established agents
+                // also benefit from soft-suspend on adversarial signals.
+                tracing::warn!(
+                    agent = %agent.id,
+                    ar = current_ar,
+                    "Tier 1 suspension: AR below threshold"
+                );
+                *life = AgentLifecycle::Suspended {
+                    since_ms: now_ms,
+                    ar_at_suspension: current_ar,
+                    ar_recovery_started_ms: None,
+                };
+            } else if let AgentLifecycle::Suspended {
+                since_ms,
+                ar_at_suspension,
+                ar_recovery_started_ms,
+            } = *life
+            {
+                // Tier 1 recovery: Suspended agents resume when AR has
+                // been above the recovery threshold for the recovery
+                // duration.
+                if current_ar >= TIER1_RECOVERY_AR_THRESHOLD {
+                    let started = ar_recovery_started_ms.unwrap_or(now_ms);
+                    if now_ms - started >= TIER1_RECOVERY_DURATION_MS {
+                        tracing::info!(
+                            agent = %agent.id,
+                            ar = current_ar,
+                            "Tier 1 recovery: resuming to Exploration with reset counters"
+                        );
+                        *life = AgentLifecycle::Exploration {
+                            successes_so_far: 0,
+                            failures_so_far: 0,
+                            entered_at_ms: now_ms,
+                            min_ar_observed: 1.0,
+                        };
+                    } else {
+                        *life = AgentLifecycle::Suspended {
+                            since_ms,
+                            ar_at_suspension,
+                            ar_recovery_started_ms: Some(started),
+                        };
+                    }
                 } else {
+                    // AR still below recovery threshold; reset the timer.
                     *life = AgentLifecycle::Suspended {
                         since_ms,
                         ar_at_suspension,
-                        ar_recovery_started_ms: Some(started),
+                        ar_recovery_started_ms: None,
                     };
                 }
-            } else {
-                // AR still below recovery threshold; reset the timer.
-                *life = AgentLifecycle::Suspended {
-                    since_ms,
-                    ar_at_suspension,
-                    ar_recovery_started_ms: None,
-                };
-            }
-            return;
-        }
+            } else if exploratory {
+                if let AgentLifecycle::Exploration {
+                    successes_so_far,
+                    failures_so_far,
+                    entered_at_ms,
+                    min_ar_observed,
+                } = *life
+                {
+                    let new_succ = successes_so_far + if success { 1 } else { 0 };
+                    let new_fail = failures_so_far + if success { 0 } else { 1 };
+                    let new_min_ar = min_ar_observed.min(current_ar);
+                    let total_calls = new_succ + new_fail;
 
-        // Exploration accounting + four-gate promotion.
-        if exploratory {
-            if let AgentLifecycle::Exploration {
-                successes_so_far,
-                failures_so_far,
-                entered_at_ms,
-                min_ar_observed,
-            } = *life
-            {
-                let new_succ = successes_so_far + if success { 1 } else { 0 };
-                let new_fail = failures_so_far + if success { 0 } else { 1 };
-                let new_min_ar = min_ar_observed.min(current_ar);
-                let total_calls = new_succ + new_fail;
-
-                let bayes_ok = scoring::promotion_gate_satisfied(
-                    new_succ,
-                    new_fail,
-                    super::lifecycle::PROMOTION_RELIABILITY_THRESHOLD,
-                    super::lifecycle::PROMOTION_CONFIDENCE,
-                );
-                let count_ok = total_calls >= super::lifecycle::PROMOTION_MIN_CALLS;
-                let tenure_ok = (now_ms - entered_at_ms)
-                    >= super::lifecycle::PROMOTION_MIN_TENURE_MS;
-                let ar_ok = new_min_ar >= super::lifecycle::PROMOTION_MIN_AR;
-
-                if count_ok && bayes_ok && tenure_ok && ar_ok {
-                    tracing::info!(
-                        agent = %agent.id,
-                        successes = new_succ,
-                        failures = new_fail,
-                        min_ar = new_min_ar,
-                        "Exploration → Production: all four gates satisfied"
+                    let bayes_ok = scoring::promotion_gate_satisfied(
+                        new_succ,
+                        new_fail,
+                        super::lifecycle::PROMOTION_RELIABILITY_THRESHOLD,
+                        super::lifecycle::PROMOTION_CONFIDENCE,
                     );
-                    *life = AgentLifecycle::Production { since_ms: now_ms };
-                } else {
-                    *life = AgentLifecycle::Exploration {
-                        successes_so_far: new_succ,
-                        failures_so_far: new_fail,
-                        entered_at_ms,
-                        min_ar_observed: new_min_ar,
-                    };
+                    let count_ok = total_calls >= super::lifecycle::PROMOTION_MIN_CALLS;
+                    let tenure_ok = (now_ms - entered_at_ms)
+                        >= super::lifecycle::PROMOTION_MIN_TENURE_MS;
+                    let ar_ok = new_min_ar >= super::lifecycle::PROMOTION_MIN_AR;
+
+                    if count_ok && bayes_ok && tenure_ok && ar_ok {
+                        tracing::info!(
+                            agent = %agent.id,
+                            successes = new_succ,
+                            failures = new_fail,
+                            min_ar = new_min_ar,
+                            "Exploration → Production: all four gates satisfied"
+                        );
+                        *life = AgentLifecycle::Production { since_ms: now_ms };
+                    } else {
+                        *life = AgentLifecycle::Exploration {
+                            successes_so_far: new_succ,
+                            failures_so_far: new_fail,
+                            entered_at_ms,
+                            min_ar_observed: new_min_ar,
+                        };
+                    }
                 }
             }
+
+            life.clone()
+        };
+
+        // Persist whatever the in-memory state now is. v0 is generous
+        // about persisting "no change" snapshots — they're idempotent
+        // upserts. If persistence fails the in-memory state is still
+        // correct for this session; restart-survival is what gets
+        // affected.
+        if let Err(e) = self
+            .storage
+            .upsert_lifecycle(&agent.id, &snapshot, now_ms)
+        {
+            tracing::warn!(error = %e, agent = %agent.id, "lifecycle persistence failed");
         }
     }
 
@@ -872,10 +909,14 @@ impl RoutingCarrier {
         if let Err(e) = self.payments.forfeit_bond(&synthetic_bond) {
             tracing::warn!(error = %e, agent = %agent_id, "payments.forfeit_bond failed");
         }
-        *agent.lifecycle.write() = AgentLifecycle::Forfeit {
+        let new_state = AgentLifecycle::Forfeit {
             at_ms: now_ms,
             reason: ForfeitReason::Manual,
         };
+        *agent.lifecycle.write() = new_state.clone();
+        if let Err(e) = self.storage.upsert_lifecycle(agent_id, &new_state, now_ms) {
+            tracing::warn!(error = %e, agent = %agent_id, "Forfeit persistence failed");
+        }
         tracing::warn!(agent = %agent_id, "manual admin Forfeit applied");
         true
     }
@@ -1026,5 +1067,79 @@ fn classify_mcp_error(e: &McpError) -> ErrorKind {
         McpError::Malformed(_) | McpError::MissingSession | McpError::NotInitialized => {
             ErrorKind::Other
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::carrier::payments::StubBackend;
+    use crate::carrier::registry::HostingAgentSpec;
+    use crate::carrier::storage::Storage;
+
+    fn spec(id: &str) -> HostingAgentSpec {
+        HostingAgentSpec {
+            id: id.into(),
+            endpoint: format!("http://127.0.0.1:0/{}", id),
+            description: None,
+            bond_amount: 0,
+            onboarded_at_ms: 0,
+            seed: true,
+            price_per_call_cents: 0,
+            carrier_take_rate_bps: 100,
+            merchant_account_id: String::new(),
+        }
+    }
+
+    /// End-to-end: applying admin_forfeit on one agent persists the
+    /// lifecycle. Reopening the carrier on the same Storage hydrates
+    /// that agent in Forfeit state. The other agent (no transition
+    /// applied) initializes fresh as Production via the seed path.
+    /// This is the property the deferred-12 follow-up was missing —
+    /// without it, an attacker recovers Forfeit by simply restarting.
+    #[test]
+    fn forfeit_persists_across_carrier_restart() {
+        let storage = Arc::new(Storage::in_memory().unwrap());
+        let payments: Arc<dyn PaymentBackend> = Arc::new(StubBackend::new());
+
+        let carrier1 = RoutingCarrier::with_storage(
+            vec![spec("alpha"), spec("beta")],
+            Arc::clone(&storage),
+            Arc::clone(&payments),
+        )
+        .expect("carrier 1 construction");
+        assert!(carrier1.admin_forfeit("beta"));
+        let s1 = carrier1.status();
+        let beta1 = s1.agents.iter().find(|a| a.id == "beta").unwrap();
+        assert!(matches!(beta1.lifecycle, AgentLifecycle::Forfeit { .. }));
+        drop(carrier1);
+
+        // Reopen on the same storage — beta should hydrate as Forfeit;
+        // alpha should initialize fresh as Production (seed=true).
+        let carrier2 = RoutingCarrier::with_storage(
+            vec![spec("alpha"), spec("beta")],
+            storage,
+            payments,
+        )
+        .expect("carrier 2 construction");
+        let s2 = carrier2.status();
+        let beta2 = s2.agents.iter().find(|a| a.id == "beta").unwrap();
+        let alpha2 = s2.agents.iter().find(|a| a.id == "alpha").unwrap();
+        assert!(
+            matches!(
+                beta2.lifecycle,
+                AgentLifecycle::Forfeit {
+                    reason: ForfeitReason::Manual,
+                    ..
+                }
+            ),
+            "beta should hydrate as Forfeit, got {:?}",
+            beta2.lifecycle
+        );
+        assert!(
+            matches!(alpha2.lifecycle, AgentLifecycle::Production { .. }),
+            "alpha should still be Production after restart, got {:?}",
+            alpha2.lifecycle
+        );
     }
 }
