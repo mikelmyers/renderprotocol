@@ -11,19 +11,25 @@
 //   - Add WAL-mode rotation, point-in-time recovery, etc., once durability
 //     stops being best-effort.
 //
-// Schema migrations are versioned via the `schema_version` table; v1 is
-// the initial 5c shape. A version mismatch on open triggers a migration
-// pass; missing tables are created.
+// Schema migrations are versioned via the `schema_version` table.
+//   v1 — initial 5c shape: receipts, vouches, agent_keys, receipt_summaries.
+//   v2 — adds agent_lifecycle (post-5c follow-up): persists Forfeit /
+//        Suspended / Exploration counters across restarts so slash
+//        decisions survive. v1 stores upgrade in place.
+// A version mismatch on open triggers a migration pass; missing tables
+// are created.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use parking_lot::Mutex;
 use rusqlite::{params, Connection, OptionalExtension};
 
+use super::lifecycle::AgentLifecycle;
 use super::receipts::{ErrorKind, Receipt};
 use super::vouches::Vouch;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
@@ -31,6 +37,8 @@ pub enum StorageError {
     Sqlite(#[from] rusqlite::Error),
     #[error("schema version mismatch: file at {found}, code at {expected}")]
     VersionMismatch { found: i64, expected: i64 },
+    #[error("serde: {0}")]
+    Serde(String),
 }
 
 /// Owns the connection. Behind a Mutex because rusqlite's `Connection`
@@ -130,6 +138,12 @@ impl Storage {
                 private_key BLOB,
                 created_at_ms INTEGER NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS agent_lifecycle (
+                agent_id TEXT PRIMARY KEY,
+                state_json TEXT NOT NULL,
+                updated_at_ms INTEGER NOT NULL
+            );
             ",
         )?;
 
@@ -146,7 +160,18 @@ impl Storage {
                 )?;
             }
             Some(v) if v == SCHEMA_VERSION => {}
+            Some(v) if v < SCHEMA_VERSION => {
+                // Forward-only upgrade. The CREATE TABLE IF NOT EXISTS
+                // statements above already added any new tables (e.g.
+                // agent_lifecycle from v1 → v2); just bump the version.
+                conn.execute(
+                    "UPDATE schema_version SET version = ?1",
+                    params![SCHEMA_VERSION],
+                )?;
+            }
             Some(v) => {
+                // Downgrade — refuse rather than silently corrupt the
+                // store with stale schema assumptions.
                 return Err(StorageError::VersionMismatch {
                     found: v,
                     expected: SCHEMA_VERSION,
@@ -354,6 +379,65 @@ impl Storage {
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(StorageError::from)
     }
+
+    // ---- Agent lifecycle (5c follow-up) ---------------------------------
+
+    /// Upsert an agent's lifecycle state. Called on every transition in
+    /// `RoutingCarrier::update_lifecycle_for` and on `admin_forfeit` so
+    /// state survives restart. The state itself is stored as
+    /// JSON-serialized `AgentLifecycle` — the enum is small and
+    /// serde-tagged, and JSON keeps the schema flexible if variants are
+    /// added/removed in future increments without further migrations.
+    pub fn upsert_lifecycle(
+        &self,
+        agent_id: &str,
+        life: &AgentLifecycle,
+        now_ms: i64,
+    ) -> Result<(), StorageError> {
+        let json = serde_json::to_string(life)
+            .map_err(|e| StorageError::Serde(e.to_string()))?;
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO agent_lifecycle (agent_id, state_json, updated_at_ms)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(agent_id) DO UPDATE SET
+                state_json = excluded.state_json,
+                updated_at_ms = excluded.updated_at_ms",
+            params![agent_id, json, now_ms],
+        )?;
+        Ok(())
+    }
+
+    /// Load every persisted lifecycle. Used by
+    /// `RoutingCarrier::with_storage` to restore agent state on boot.
+    /// Rows that fail to deserialize (e.g. an enum variant that was
+    /// removed) are skipped with a warning rather than failing the
+    /// whole hydration — those agents fall back to their default
+    /// initial state.
+    pub fn load_all_lifecycles(&self) -> Result<HashMap<String, AgentLifecycle>, StorageError> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare("SELECT agent_id, state_json FROM agent_lifecycle")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut out: HashMap<String, AgentLifecycle> = HashMap::new();
+        for row in rows {
+            let (agent_id, state_json) = row?;
+            match serde_json::from_str::<AgentLifecycle>(&state_json) {
+                Ok(life) => {
+                    out.insert(agent_id, life);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        agent = %agent_id,
+                        error = %e,
+                        "skipping unparseable persisted lifecycle"
+                    );
+                }
+            }
+        }
+        Ok(out)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -552,5 +636,76 @@ mod tests {
             .unwrap();
         assert_eq!(count, 5);
         assert_eq!(success_count, 5);
+    }
+
+    #[test]
+    fn lifecycle_round_trips_each_variant() {
+        use crate::carrier::lifecycle::{AgentLifecycle, ForfeitReason};
+        let s = Storage::in_memory().unwrap();
+
+        let exploration = AgentLifecycle::Exploration {
+            successes_so_far: 7,
+            failures_so_far: 2,
+            entered_at_ms: 1_000,
+            min_ar_observed: 0.83,
+        };
+        let production = AgentLifecycle::Production { since_ms: 5_000 };
+        let suspended = AgentLifecycle::Suspended {
+            since_ms: 8_000,
+            ar_at_suspension: 0.21,
+            ar_recovery_started_ms: Some(9_500),
+        };
+        let forfeit = AgentLifecycle::Forfeit {
+            at_ms: 10_000,
+            reason: ForfeitReason::Manual,
+        };
+
+        s.upsert_lifecycle("alpha", &exploration, 1).unwrap();
+        s.upsert_lifecycle("beta", &production, 2).unwrap();
+        s.upsert_lifecycle("gamma", &suspended, 3).unwrap();
+        s.upsert_lifecycle("delta", &forfeit, 4).unwrap();
+
+        let loaded = s.load_all_lifecycles().unwrap();
+        assert_eq!(loaded.len(), 4);
+        assert!(matches!(
+            loaded["alpha"],
+            AgentLifecycle::Exploration { successes_so_far: 7, .. }
+        ));
+        assert!(matches!(
+            loaded["beta"],
+            AgentLifecycle::Production { since_ms: 5_000 }
+        ));
+        assert!(matches!(
+            loaded["gamma"],
+            AgentLifecycle::Suspended { ar_recovery_started_ms: Some(9_500), .. }
+        ));
+        assert!(matches!(
+            loaded["delta"],
+            AgentLifecycle::Forfeit { reason: ForfeitReason::Manual, .. }
+        ));
+    }
+
+    #[test]
+    fn lifecycle_upsert_overwrites_existing() {
+        use crate::carrier::lifecycle::{AgentLifecycle, ForfeitReason};
+        let s = Storage::in_memory().unwrap();
+        s.upsert_lifecycle(
+            "alpha",
+            &AgentLifecycle::Production { since_ms: 1 },
+            1,
+        )
+        .unwrap();
+        s.upsert_lifecycle(
+            "alpha",
+            &AgentLifecycle::Forfeit {
+                at_ms: 2,
+                reason: ForfeitReason::Manual,
+            },
+            2,
+        )
+        .unwrap();
+        let loaded = s.load_all_lifecycles().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert!(matches!(loaded["alpha"], AgentLifecycle::Forfeit { .. }));
     }
 }
