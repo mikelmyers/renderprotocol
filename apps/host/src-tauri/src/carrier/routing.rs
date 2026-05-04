@@ -45,6 +45,14 @@ use crate::protocols::mcp::{McpClient, McpError, ToolCallResult};
 /// it runs.
 const AUTHORITY_RECOMPUTE_INTERVAL: usize = 50;
 
+/// Probability that a routing decision picks uniformly at random across
+/// all eligible providers, regardless of their score or lifecycle state.
+/// Standard ε-greedy on top of Thompson sampling. Without this the
+/// score-max picker compounds its own observations and locks onto the
+/// winner of the first coin flip — see `pick_provider`'s ε-greedy block
+/// for the bug this closes.
+const EPSILON_EXPLORE: f64 = 0.05;
+
 /// One hosting agent the carrier routes to. Each holds its own MCP
 /// client + connection state; the carrier never reaches into another
 /// agent's session. 5b adds the lifecycle state — Exploration /
@@ -447,11 +455,17 @@ impl RoutingCarrier {
     /// Picker logic:
     ///   1. Filter to agents that are MCP-Ready AND lifecycle-routable
     ///      (Exploration or Production; Suspended/Forfeit are excluded).
-    ///   2. With probability `EXPLORATION_ALLOCATION_FRACTION`, force a
+    ///   2. ε-greedy noise: with probability `EPSILON_EXPLORE`, pick
+    ///      uniformly at random across all eligible providers. Closes
+    ///      the "loser of the first coin flip never gets sampled"
+    ///      lockout that pure score-max creates, per `§4.1 Component 5`'s
+    ///      "exploration noise injection so new candidates keep getting
+    ///      evaluated."
+    ///   3. With probability `EXPLORATION_ALLOCATION_FRACTION`, force a
     ///      random Exploration-state pick if any are eligible. This is
     ///      the §3.2 bonded-exposure mechanism — cold-start agents
     ///      get sampled at a guaranteed floor regardless of score.
-    ///   3. Otherwise: argmax of `scoring::score(...)` across remaining
+    ///   4. Otherwise: argmax of `scoring::score(...)` across remaining
     ///      eligible providers.
     fn pick_provider(&self, tool: &str) -> Option<(usize, bool)> {
         let catalog = self.catalog.read();
@@ -469,18 +483,30 @@ impl RoutingCarrier {
         }
         drop(catalog);
 
+        let mut rng = thread_rng();
+
+        // ε-greedy exploration noise across ALL eligible providers,
+        // independent of lifecycle state. This is the noise-injection
+        // tier from `§4.1 Component 5`. Without it, score-argmax + the
+        // recursive amplification of authority/latency observations
+        // locks the picker onto whoever wins the first Thompson roll.
+        if rng.gen::<f64>() < EPSILON_EXPLORE {
+            let pick = eligible[rng.gen_range(0..eligible.len())];
+            let exploratory = self.agents[pick].lifecycle.read().is_exploration();
+            return Some((pick, exploratory));
+        }
+
         // Forced exploration allocation (§3.2 bounded exposure).
         let exploration_eligible: Vec<usize> = eligible
             .iter()
             .copied()
             .filter(|&i| self.agents[i].lifecycle.read().is_exploration())
             .collect();
-        if !exploration_eligible.is_empty() {
-            let mut rng = thread_rng();
-            if rng.gen::<f64>() < EXPLORATION_ALLOCATION_FRACTION {
-                let pick = exploration_eligible[rng.gen_range(0..exploration_eligible.len())];
-                return Some((pick, true));
-            }
+        if !exploration_eligible.is_empty()
+            && rng.gen::<f64>() < EXPLORATION_ALLOCATION_FRACTION
+        {
+            let pick = exploration_eligible[rng.gen_range(0..exploration_eligible.len())];
+            return Some((pick, true));
         }
 
         if eligible.len() == 1 {
