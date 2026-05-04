@@ -1,129 +1,198 @@
-import { useSurfaceBus } from "../../lib/surface-bus";
-import { resolveReference } from "../../lib/element-registry";
-import { useActiveAgent, useConfig } from "../../lib/config";
-import { useCompositionState } from "../../lib/use-composition";
-import { NarrativeView } from "../render-field/primitives/NarrativeView";
+import { useCallback, useState } from "react";
+import { ipc, type ResourceContentItem } from "../../lib/ipc";
+import { useActiveComposition } from "../../lib/active-composition";
+import { surfaceBus } from "../../lib/surface-bus";
+import { routeIntent } from "../../lib/intent-router";
+import { useTools, type ToolDefinition } from "../../lib/use-tools";
+import type {
+  ResourceCsp,
+  ResourcePermissions,
+  UiResourceEnvelope,
+} from "../../lib/composer";
+import { Composer } from "./Composer";
+import { MessageList, type Message } from "./MessageList";
 
-// Conversation panel — the agent's voice on the left.
+// ConversationPanel: the persistent home of the user's agent. Owns the
+// conversation thread, dispatches user intent through the (host-side)
+// intent router → carrier (passthrough v0) → MCP, and pushes either the
+// raw structured payload or a UI-resource envelope (SEP-1865) into
+// active-composition for the composer to interpret.
 //
-// For step 5 the panel is composer-driven: the morning-brief composer
-// produces a NarrativeSpec (deterministic v0; same shape an LLM call
-// will produce later) and we render it through NarrativeView. Embedded
-// `[ref:elementId]` tokens resolve against the live element registry,
-// so clicking "Drone 7 vibration" jumps the right pane to that timeline
-// event.
-//
-// Selection echo and the active agent's contract still surface below
-// the narrative — the panel is one place to see what the agent decided
-// AND why.
+// Type-narrowing per source-tool is the composer's job — this panel
+// handles routing + transport + the UI-resource fetch when a called tool
+// is associated with a `ui://` resource.
+
+const HTML_MIME_PREFIX = "text/html";
 
 export function ConversationPanel() {
-  const selected = useSurfaceBus((s) => s.selected);
-  const tick = useSurfaceBus((s) => s.tick);
-  void tick;
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [busy, setBusy] = useState(false);
+  const setComposition = useActiveComposition((s) => s.setCurrent);
+  const { tools, uiResourceUriFor } = useTools();
 
-  const ready = useConfig((s) => s.ready);
-  const dir = useConfig((s) => s.dir);
-  const { key: activeKey, doc: activeDoc } = useActiveAgent();
-  const narrative = useCompositionState((s) => s.narrative);
-  const status = useCompositionState((s) => s.status);
-  const watching = useCompositionState((s) => s.watching);
+  const handleSubmit = useCallback(
+    async (text: string) => {
+      const userMsg: Message = {
+        id: makeId(),
+        role: "user",
+        text,
+        ts_ms: Date.now(),
+      };
+      setMessages((prev) => [...prev, userMsg]);
+      setBusy(true);
 
-  const resolved = selected ? resolveReference(selected) : null;
-  const display = resolved?.metadata?.display ?? null;
+      surfaceBus.requestRecompose(text, {});
+
+      const route = routeIntent(text);
+
+      try {
+        const res = await ipc.callTool(route.tool, route.args);
+
+        // If tools/list hasn't populated the cache yet (window just
+        // opened), fetch inline so the first submission still resolves
+        // UI-resource associations correctly.
+        let resourceUri = uiResourceUriFor(route.tool);
+        if (!resourceUri && tools === null) {
+          resourceUri = await fetchUiResourceUriInline(route.tool);
+        }
+
+        const data = resourceUri
+          ? await buildUiResourceEnvelope(resourceUri, res.raw)
+          : (res.structured ?? parseJsonText(res.text));
+
+        if (data === undefined) {
+          throw new Error("hosting agent returned no parseable payload");
+        }
+
+        setComposition({
+          intent: text,
+          source_tool: route.tool,
+          data,
+          served_by: res.served_by,
+          latency_ms: res.latency_ms,
+          ts_ms: Date.now(),
+        });
+
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: makeId(),
+            role: "agent",
+            text: route.agentMessage,
+            ts_ms: Date.now(),
+          },
+        ]);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: makeId(),
+            role: "system",
+            text: `Tool call failed: ${msg}`,
+            ts_ms: Date.now(),
+          },
+        ]);
+      } finally {
+        setBusy(false);
+      }
+    },
+    [setComposition, tools, uiResourceUriFor],
+  );
 
   return (
-    <div className="render-field">
-      <div className="pane__body">
-        {!ready && (
-          <div className="conversation__placeholder">Loading configuration…</div>
-        )}
-
-        {ready && !activeDoc && (
-          <div className="conversation__placeholder">
-            No <code>agent.md</code> loaded.
-            <br />
-            <br />
-            Drop a markdown file into <code>{dir ?? "config/agents/"}</code> —
-            the surface watches that directory and reloads automatically.
-          </div>
-        )}
-
-        {/* Composer's narrative — what the agent has to say this morning. */}
-        {narrative && narrative.body.trim() && (
-          <section className="conv-section">
-            <NarrativeView
-              composition="conversation"
-              source_tool="composer"
-              entity="morning-brief-summary"
-              body={narrative.body}
-            />
-          </section>
-        )}
-
-        {status === "fetching" && !narrative && (
-          <div className="conversation__placeholder">Composing morning brief…</div>
-        )}
-
-        {/* What the agent is watching but can't see (concerns without tools). */}
-        {watching.length > 0 && (
-          <section className="conv-section">
-            <div className="conv-section__head">Standing concerns</div>
-            <ul className="conv-watching">
-              {watching.map((w, i) => (
-                <li key={i}>
-                  <span>{w.label}</span>
-                  <span className="conv-watching__hint">no tool connected</span>
-                </li>
-              ))}
-            </ul>
-          </section>
-        )}
-
-        {/* Selection echo — proves the bus reaches both panes. */}
-        {selected && (
-          <section className="conv-section">
-            <div className="conv-section__head">Selection</div>
-            <div className="conversation__system">
-              {selected}
-              {resolved?.status === "live" && display && (
-                <>
-                  {`\nresolved: live`}
-                  {Object.entries(display)
-                    .map(([k, v]) => `\n  ${k}: ${String(v)}`)
-                    .join("")}
-                </>
-              )}
-              {resolved?.status === "tombstoned" && (
-                <>{`\nresolved: tombstoned (no longer mounted — reference fallback would offer to bring it back)`}</>
-              )}
-              {resolved?.status === "unknown" && (
-                <>{`\nresolved: unknown (no metadata)`}</>
-              )}
-            </div>
-          </section>
-        )}
-
-        {/* Active agent contract surfaced for transparency — moved below the
-            narrative so the headline reads first. */}
-        {activeDoc && (
-          <section className="conv-section conv-section--muted">
-            <div className="conv-section__head">
-              Active agent — {activeDoc.title ?? activeKey ?? "unnamed"}
-            </div>
-            {activeDoc.typed.defaults.length > 0 && (
-              <>
-                <div className="conv-section__sub">Defaults</div>
-                <ul className="conv-agent__bullets">
-                  {activeDoc.typed.defaults.map((d, i) => (
-                    <li key={i}>{d}</li>
-                  ))}
-                </ul>
-              </>
-            )}
-          </section>
-        )}
+    <div className="conversation">
+      <div className="conversation__thread">
+        <MessageList messages={messages} busy={busy} />
+      </div>
+      <div className="conversation__composer">
+        <Composer onSubmit={handleSubmit} busy={busy} />
       </div>
     </div>
   );
+}
+
+// Look up `_meta.ui.resourceUri` for a tool by issuing a fresh tools/list.
+// Used only when the useTools cache hasn't populated yet (first submission
+// race). The hook fills its own cache asynchronously in parallel.
+async function fetchUiResourceUriInline(toolName: string): Promise<string | undefined> {
+  try {
+    const res = await ipc.listTools();
+    const list = (res as { tools?: ToolDefinition[] }).tools ?? [];
+    return list.find((t) => t.name === toolName)?._meta?.ui?.resourceUri;
+  } catch {
+    return undefined;
+  }
+}
+
+// Fetch the `ui://` resource via resources/read and assemble the envelope
+// the composer expects. Pulls _meta.ui.csp / permissions / prefersBorder
+// out of the response to drive iframe sandbox + CSP construction.
+async function buildUiResourceEnvelope(
+  uri: string,
+  toolResult: unknown,
+): Promise<UiResourceEnvelope> {
+  const routed = await ipc.mcpReadResource(uri);
+  const htmlItem = routed.response.contents.find(isHtmlContentItem);
+  if (!htmlItem || typeof htmlItem.text !== "string") {
+    throw new Error(
+      `UI resource ${uri} (served by ${routed.served_by}) returned no HTML content`,
+    );
+  }
+  const ui = extractUiMeta(htmlItem._meta);
+  return {
+    kind: "ui_resource",
+    uri,
+    html: htmlItem.text,
+    csp: ui.csp,
+    permissions: ui.permissions,
+    prefersBorder: ui.prefersBorder,
+    toolResult,
+  };
+}
+
+function isHtmlContentItem(c: ResourceContentItem): boolean {
+  return (
+    typeof c.text === "string" &&
+    typeof c.mimeType === "string" &&
+    c.mimeType.startsWith(HTML_MIME_PREFIX)
+  );
+}
+
+interface UiMeta {
+  csp: ResourceCsp;
+  permissions: ResourcePermissions;
+  prefersBorder?: boolean;
+}
+
+// Defensive: any missing/malformed _meta.ui defaults to the spec's
+// locked-down posture (no CSP relaxations, no permissions).
+function extractUiMeta(raw: Record<string, unknown> | undefined): UiMeta {
+  const ui = raw?.["ui"];
+  if (typeof ui !== "object" || ui === null) {
+    return { csp: {}, permissions: {} };
+  }
+  const u = ui as {
+    csp?: ResourceCsp;
+    permissions?: ResourcePermissions;
+    prefersBorder?: boolean;
+  };
+  return {
+    csp: u.csp ?? {},
+    permissions: u.permissions ?? {},
+    prefersBorder: typeof u.prefersBorder === "boolean" ? u.prefersBorder : undefined,
+  };
+}
+
+function parseJsonText(text: string | null): unknown | undefined {
+  if (!text) return undefined;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+}
+
+function makeId(): string {
+  return crypto.randomUUID();
 }

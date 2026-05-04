@@ -1,34 +1,33 @@
-pub mod audit;
 pub mod bus;
 pub mod carrier;
 pub mod commands;
 pub mod config_parser;
-pub mod config_store;
 pub mod config_watcher;
 pub mod protocols;
 
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use tauri::{Emitter, Manager};
 
-use crate::audit::AuditLog;
 use crate::bus::Bus;
-use crate::carrier::PassthroughCarrier;
-use crate::config_store::{ConfigKind, ConfigStore};
-use crate::protocols::mcp::McpClient;
+use crate::carrier::registry::{self, HostingAgentSpec};
+use crate::carrier::RoutingCarrier;
+use crate::config_watcher::ConfigStore;
 
 /// Shared state injected into every Tauri command via `State<'_, AppState>`.
 /// Held as Arcs so background tasks can clone freely.
 pub struct AppState {
-    pub mcp: Arc<McpClient>,
-    pub carrier: Arc<PassthroughCarrier>,
+    pub carrier: Arc<RoutingCarrier>,
     pub bus: Arc<Bus>,
-    pub config: Arc<ConfigStore>,
-    pub audit: Arc<AuditLog>,
+    /// In-process store of parsed agent.md / user.md. Updated by the file
+    /// watcher; read by Tauri commands.
+    pub config: Arc<Mutex<ConfigStore>>,
 }
 
-const DEFAULT_MCP_ENDPOINT: &str = "http://127.0.0.1:4717/mcp";
+/// Newtype owning the file-watcher for the app's lifetime. Held via
+/// Tauri's managed-state container so the watcher's destructor only runs
+/// at app shutdown.
+struct WatcherSlot(#[allow(dead_code)] notify::RecommendedWatcher);
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -39,123 +38,57 @@ pub fn run() {
         )
         .init();
 
-    let endpoint = std::env::var("RENDERPROTOCOL_MCP_ENDPOINT")
-        .unwrap_or_else(|_| DEFAULT_MCP_ENDPOINT.to_string());
+    let bus = Bus::new();
+    let config = Arc::new(Mutex::new(ConfigStore::default()));
 
-    let mcp = Arc::new(McpClient::new(endpoint.clone()));
-    let carrier = Arc::new(PassthroughCarrier::new(mcp.clone()));
-    let config = Arc::new(ConfigStore::new());
+    // Resolve the registry of hosting agents the carrier should connect
+    // to. config/hosting-agents.md is the source of truth; if it's missing
+    // we fall back to the historical single-mock default so a fresh
+    // checkout still boots into something.
+    let agent_specs = load_agent_specs();
+    if agent_specs.is_empty() {
+        tracing::warn!("no hosting agents configured; carrier will have nothing to route to");
+    }
+    let carrier = Arc::new(RoutingCarrier::new(agent_specs));
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .manage(AppState {
+            carrier: Arc::clone(&carrier),
+            bus,
+            config: Arc::clone(&config),
+        })
         .setup(move |app| {
-            // Audit log lives in Tauri's platform-appropriate app data
-            // directory. Resolved at setup time because we need the
-            // app handle for path resolution.
-            let audit_path = app
-                .path()
-                .app_data_dir()
-                .unwrap_or_else(|_| PathBuf::from("."))
-                .join("audit.sqlite");
-            tracing::info!(path = %audit_path.display(), "opening audit log");
-            let audit = AuditLog::open(&audit_path)
-                .unwrap_or_else(|e| {
-                    tracing::error!(error = %e, "audit log open failed; aborting");
-                    std::process::exit(1);
-                });
+            let app_for_carrier = app.handle().clone();
+            // The carrier owns its own per-agent init lifecycle (retry,
+            // catalog refresh, ready/error events). We just hand it the
+            // app handle for emitting events.
+            carrier.spawn_init_tasks(app_for_carrier);
 
-            // Now that we have audit + the rest of the substrate, register
-            // application state. Bus is created here so it can be wired
-            // to the audit log in a single place.
-            let bus = Bus::new(audit.clone());
-            app.manage(AppState {
-                mcp: mcp.clone(),
-                carrier: carrier.clone(),
-                bus: bus.clone(),
-                config: config.clone(),
-                audit: audit.clone(),
-            });
-            let handle = app.handle().clone();
-            let mcp_for_init = mcp.clone();
-            let endpoint_for_log = endpoint.clone();
+            // Also fire mcp:error if every agent eventually fails. For
+            // v0 simplicity we let per-agent agent:error events serve the
+            // diagnostic role; mcp:error stays for legacy "totally
+            // unreachable" UX hooks but isn't synthesized aggregate-wise
+            // here. Add when there's a UI that needs it.
+            let _ = app.handle().emit("carrier:configured", ());
 
-            // ── MCP initialize + notifications listener ─────────────
-            let endpoint_for_listener = endpoint.clone();
-            let mcp_for_listener = mcp.clone();
-            let handle_for_listener = handle.clone();
-            tauri::async_runtime::spawn(async move {
-                tracing::info!(endpoint = %endpoint_for_log, "initializing MCP client");
-                let mut attempts = 0u32;
-                loop {
-                    attempts += 1;
-                    match mcp_for_init.initialize().await {
-                        Ok(_) => {
-                            tracing::info!(
-                                session = ?mcp_for_init.session_id(),
-                                "MCP initialized"
-                            );
-                            let _ = handle.emit(
-                                "mcp:ready",
-                                serde_json::json!({ "session": mcp_for_init.session_id() }),
-                            );
-                            // Now that initialize is done, kick off the
-                            // long-lived SSE listener for server-initiated
-                            // notifications. It self-reconnects with
-                            // backoff; no further coordination required.
-                            protocols::mcp::notifications::spawn(
-                                handle_for_listener.clone(),
-                                mcp_for_listener.clone(),
-                                endpoint_for_listener.clone(),
-                            );
-                            break;
-                        }
-                        Err(e) if attempts < 20 => {
-                            tracing::debug!(error = %e, attempt = attempts, "MCP initialize retry");
-                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                        }
-                        Err(e) => {
-                            tracing::error!(error = %e, "MCP initialize gave up");
-                            let _ = handle.emit(
-                                "mcp:error",
-                                serde_json::json!({ "error": e.to_string() }),
-                            );
-                            break;
-                        }
+            // Resolve config dir, initial-load + start the watcher. If the
+            // dir is missing (fresh checkout), log and continue — the
+            // surface still works without it; commands will return None.
+            let config_dir = config_watcher::resolve_config_dir();
+            if config_dir.is_dir() {
+                let app_for_watcher = app.handle().clone();
+                let store_for_watcher = Arc::clone(&config);
+                match config_watcher::start(config_dir.clone(), store_for_watcher, app_for_watcher) {
+                    Ok(w) => {
+                        app.manage(WatcherSlot(w));
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, dir = %config_dir.display(), "config watcher failed to start");
                     }
                 }
-            });
-
-            // ── Config load + watch ─────────────────────────────────
-            // For v0 the config dir resolves to `config/` relative to the
-            // current working directory (the project root in `tauri dev`).
-            // Production builds need a different resolver (app data dir
-            // or a user-selected directory) — TODO when bundling lands.
-            let config_dir = resolve_config_dir();
-            let config_for_load = config.clone();
-            let handle_for_load = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                load_initial_config(&config_dir, &config_for_load).await;
-                let _ = handle_for_load.emit(
-                    "config:ready",
-                    serde_json::json!({ "dir": config_dir.display().to_string() }),
-                );
-            });
-
-            let watcher_dir = resolve_config_dir();
-            let watcher_handle = app.handle().clone();
-            let watcher_store = config.clone();
-            // We never tear the watcher down during the app's lifetime —
-            // the OS reclaims when the process exits. RecommendedWatcher
-            // isn't necessarily Sync (varies by platform), so rather
-            // than wrapping it in a lock just to satisfy `manage`, we
-            // leak it. Cheap, intentional, well-scoped.
-            match config_watcher::spawn(watcher_handle, watcher_dir, watcher_store) {
-                Ok(watcher) => {
-                    let _ = Box::leak(Box::new(watcher));
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "config watcher failed to start");
-                }
+            } else {
+                tracing::warn!(dir = %config_dir.display(), "config directory not found; skipping watcher");
             }
 
             Ok(())
@@ -164,67 +97,42 @@ pub fn run() {
             commands::mcp::mcp_list_tools,
             commands::mcp::mcp_call_tool,
             commands::mcp::mcp_read_resource,
+            commands::mcp::mcp_status,
+            commands::mcp::carrier_status,
             commands::bus::bus_emit,
-            commands::config::config_snapshot,
-            commands::config::config_set_active_agent,
-            commands::audit::audit_query,
-            commands::audit::audit_record,
+            commands::config::current_agent_md,
+            commands::config::current_user_md,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
 
-fn resolve_config_dir() -> PathBuf {
-    if let Ok(env) = std::env::var("RENDERPROTOCOL_CONFIG_DIR") {
-        return PathBuf::from(env);
-    }
-    // Walk up from CWD looking for a `config/` dir alongside `package.json`.
-    // In `tauri dev` the CWD is `apps/host/src-tauri`; the config lives at
-    // the repo root. Tolerate a few levels of nesting.
-    if let Ok(cwd) = std::env::current_dir() {
-        let mut probe = cwd.clone();
-        for _ in 0..6 {
-            let candidate = probe.join("config");
-            let pkg = probe.join("package.json");
-            if candidate.is_dir() && pkg.exists() {
-                return candidate;
-            }
-            if !probe.pop() {
-                break;
-            }
+/// Load the registry from config/hosting-agents.md, applying the same
+/// path-resolution rules (env override + CARGO_MANIFEST_DIR-relative
+/// default) as the config watcher.
+fn load_agent_specs() -> Vec<HostingAgentSpec> {
+    let config_dir = config_watcher::resolve_config_dir();
+    let path = config_dir.join("hosting-agents.md");
+    match registry::load_from_path(&path) {
+        Ok(v) if !v.is_empty() => {
+            tracing::info!(path = %path.display(), count = v.len(), "loaded hosting agents");
+            v
         }
-        // Fall back to CWD/config even if we didn't find the marker.
-        return cwd.join("config");
+        Ok(_) => {
+            tracing::warn!(path = %path.display(), "hosting-agents.md present but empty; using built-in default");
+            default_specs()
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, path = %path.display(), "hosting-agents.md missing or unreadable; using built-in default");
+            default_specs()
+        }
     }
-    PathBuf::from("config")
 }
 
-async fn load_initial_config(dir: &PathBuf, store: &ConfigStore) {
-    let user_path = dir.join("user.md");
-    if user_path.is_file() {
-        if let Ok(text) = tokio::fs::read_to_string(&user_path).await {
-            store.upsert(ConfigKind::User, "user", &text);
-        }
-    }
-    let agents_dir = dir.join("agents");
-    if agents_dir.is_dir() {
-        if let Ok(mut entries) = tokio::fs::read_dir(&agents_dir).await {
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                let p = entry.path();
-                if !p.is_file() {
-                    continue;
-                }
-                if p.extension().and_then(|s| s.to_str()) != Some("md") {
-                    continue;
-                }
-                let key = match p.file_stem().and_then(|s| s.to_str()) {
-                    Some(s) => s.to_string(),
-                    None => continue,
-                };
-                if let Ok(text) = tokio::fs::read_to_string(&p).await {
-                    store.upsert(ConfigKind::Agent, &key, &text);
-                }
-            }
-        }
-    }
+fn default_specs() -> Vec<HostingAgentSpec> {
+    vec![HostingAgentSpec {
+        id: "alpha".to_string(),
+        endpoint: "http://127.0.0.1:4717/mcp".to_string(),
+        description: Some("Built-in default; override via config/hosting-agents.md".to_string()),
+    }]
 }

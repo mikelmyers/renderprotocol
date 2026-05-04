@@ -1,218 +1,263 @@
-// Composition engine. Pure-function core; React-side wiring lives in
-// hooks/useComposition. The composer reads (intent, user.md, agent.md),
-// matches rules against capability declarations (the tool catalog), plans
-// the parallel data fetches, and — once the data lands — assembles a
-// LayoutSpec the render field can interpret.
+// Composer — pure function that maps an ActiveComposition to a typed
+// PrimitiveSelection the render field can switch-render. Single dispatch
+// site for the whole surface; primitives never inspect raw tool payloads.
 //
-// This is the seam STRUCTURE.md §6 promised: "rules expressed
-// declaratively per composition so a learned-selection layer can later
-// replace selection without rewriting the engine." For v0 the rules are
-// hand-authored. The shape below is what a learned ranker would output.
+// v0 dispatches on `source_tool`. Step 4+ may add intent or agent.md
+// hints to influence which primitive is chosen for an ambiguous shape
+// (e.g. a list could be Tabular or Timeline depending on the intent).
+// Keep `compose(composition)` as the single entry point.
 
-import type { ParsedDoc } from "./config";
+import {
+  TOOL_NAMES,
+  type AlertItem,
+  type AlertSeverity,
+  type GetAlertsResult,
+  type GetRecentEventsResult,
+  type ListItemsResult,
+  type LookupResult,
+  type TableColumn,
+  type TableRow,
+  type TimelineEvent,
+} from "@renderprotocol/protocol-types";
+import type { ActiveComposition } from "./active-composition";
 
-// ── Types the renderer cares about ───────────────────────────────────
-
-export type PrimitiveKind =
-  | "timeline"
-  | "alert"
-  | "narrative"
-  | "table"
-  | "live_feed"
-  | "mcp_app"
-  | "action_card";
-
-export interface SlotSpec {
-  /** Stable id within the composition; used for layout keying + traces. */
-  id: string;
-  /** Which composition primitive this slot renders. */
-  primitive: PrimitiveKind;
-  /** Tool that produced the data for this slot (or "composer" for synthesized). */
-  source_tool: string;
-  /** Free-form data prop bag handed to the primitive. */
-  props: Record<string, unknown>;
-  /** Why the rule fired — surfaces under each slot for transparency. */
-  trace: SlotTrace;
-  /** Sort order within the composition; higher importance first. */
-  importance: number;
+// SEP-1865 _meta.ui shapes carried into the host as part of the resource
+// envelope. Empty objects are valid (= permission requested with no extra
+// config), matching the spec's pattern.
+export interface ResourceCsp {
+  connectDomains?: string[];
+  resourceDomains?: string[];
+  frameDomains?: string[];
+  baseUriDomains?: string[];
 }
 
-export interface SlotTrace {
-  /** Short label, e.g. "Standing concern: Drone hardware health". */
-  reason: string;
-  /** Where the reason came from — user.md, agent.md, or a default rule. */
-  source: TraceSource;
+export interface ResourcePermissions {
+  camera?: Record<string, unknown>;
+  microphone?: Record<string, unknown>;
+  geolocation?: Record<string, unknown>;
+  clipboardWrite?: Record<string, unknown>;
 }
 
-export type TraceSource =
-  | { kind: "user_md"; section: string; bullet?: string }
-  | { kind: "agent_md"; section: string; bullet?: string }
-  | { kind: "default" };
-
-export interface LayoutSpec {
-  intent: string;
-  slots: SlotSpec[];
-  /** Standing concerns surfaced but with no available tool match. */
-  watching: WatchingItem[];
+// Tagged envelope ConversationPanel constructs when a tool has an
+// associated `ui://` resource. Lives on ActiveComposition.data when
+// present; the composer dispatches on its presence before falling back
+// to source_tool routing.
+export interface UiResourceEnvelope {
+  kind: "ui_resource";
+  uri: string;
+  html: string;
+  csp: ResourceCsp;
+  permissions: ResourcePermissions;
+  prefersBorder?: boolean;
+  /// Raw MCP tool-call result (the full response object). Forwarded to
+  /// the iframe verbatim via ui/notifications/tool-result so the iframe
+  /// sees what a standard MCP client would have seen.
+  toolResult: unknown;
 }
 
-export interface WatchingItem {
-  label: string;
-  source: TraceSource;
-}
-
-export interface NarrativeSpec {
-  /** Deterministic summary text. May contain `[ref:elementId]` tokens. */
-  body: string;
-  /** Element IDs referenced in the body, for the registry to resolve. */
-  refs: string[];
-}
-
-// ── Rule contract ────────────────────────────────────────────────────
-
-export interface ComposeContext {
-  user: ParsedDoc | null;
-  agent: ParsedDoc | null;
-}
-
-export interface Rule {
-  id: string;
-  primitive: PrimitiveKind;
-  /** The tool the rule wants to call. Null for composer-synthesized slots. */
-  tool: { name: string; args?: Record<string, unknown> } | null;
-  /**
-   * Predicate: does this rule fire for the current (user, agent)? Returns
-   * a trace describing why if it matches, or null if it doesn't.
-   */
-  matches: (ctx: ComposeContext) => SlotTrace | null;
-  /** Importance (0..1). Higher = earlier in the layout. */
-  importance: number;
-  /** Build the slot's primitive props from the tool's data. */
-  buildProps: (data: unknown, ctx: ComposeContext) => Record<string, unknown>;
-}
-
-// ── Plan + Assemble ──────────────────────────────────────────────────
-
-export interface CompositionPlan {
-  intent: string;
-  matched: Array<{ rule: Rule; trace: SlotTrace }>;
-  /** Distinct tool calls deduped by (name + JSON-stringified args). */
-  tool_calls: ToolCall[];
-  /** Concerns from user.md with no tool match. */
-  watching: WatchingItem[];
-}
-
-export interface ToolCall {
-  key: string; // dedupe key
-  name: string;
-  args?: Record<string, unknown>;
-}
-
-export function plan(
-  intent: string,
-  rules: Rule[],
-  ctx: ComposeContext,
-  watchingScan: (ctx: ComposeContext, matched: Set<string>) => WatchingItem[],
-): CompositionPlan {
-  const matched: CompositionPlan["matched"] = [];
-  const callMap = new Map<string, ToolCall>();
-  const concernsCovered = new Set<string>();
-  for (const rule of rules) {
-    const trace = rule.matches(ctx);
-    if (!trace) continue;
-    matched.push({ rule, trace });
-    if (trace.source.kind === "user_md" && trace.source.bullet) {
-      concernsCovered.add(trace.source.bullet.toLowerCase());
+export type PrimitiveSelection =
+  | {
+      primitive: "narrative";
+      source_tool: string;
+      markdown: string;
     }
-    if (rule.tool) {
-      const key = toolKey(rule.tool.name, rule.tool.args);
-      if (!callMap.has(key)) {
-        callMap.set(key, {
-          key,
-          name: rule.tool.name,
-          ...(rule.tool.args ? { args: rule.tool.args } : {}),
-        });
-      }
+  | {
+      primitive: "tabular";
+      source_tool: string;
+      title?: string;
+      columns: TableColumn[];
+      rows: TableRow[];
     }
+  | {
+      primitive: "alerts";
+      source_tool: string;
+      alerts: AlertItem[];
+    }
+  | {
+      primitive: "timeline";
+      source_tool: string;
+      events: TimelineEvent[];
+    }
+  | {
+      primitive: "mcp_app";
+      source_tool: string;
+      uri: string;
+      html: string;
+      csp: ResourceCsp;
+      permissions: ResourcePermissions;
+      prefersBorder?: boolean;
+      toolResult: unknown;
+    }
+  | {
+      primitive: "fallback";
+      source_tool: string;
+      reason: string;
+    };
+
+export function compose(composition: ActiveComposition): PrimitiveSelection {
+  const { source_tool, data } = composition;
+
+  // UI resource takes precedence over per-tool dispatch. A hosting agent
+  // that ships its own UI is asking us to use it; we don't second-guess
+  // by also rendering a structured-data primitive.
+  if (isUiResourceEnvelope(data)) {
+    return {
+      primitive: "mcp_app",
+      source_tool,
+      uri: data.uri,
+      html: data.html,
+      csp: data.csp,
+      permissions: data.permissions,
+      prefersBorder: data.prefersBorder,
+      toolResult: data.toolResult,
+    };
   }
-  return {
-    intent,
-    matched,
-    tool_calls: Array.from(callMap.values()),
-    watching: watchingScan(ctx, concernsCovered),
-  };
-}
 
-export function assemble(
-  plan: CompositionPlan,
-  data: Map<string, unknown>,
-  ctx: ComposeContext,
-): LayoutSpec {
-  const slots: SlotSpec[] = plan.matched
-    .map(({ rule, trace }, i): SlotSpec | null => {
-      const dataForRule = rule.tool ? data.get(toolKey(rule.tool.name, rule.tool.args)) : null;
-      const props = rule.buildProps(dataForRule, ctx);
-      // A rule may opt out at assembly time (e.g. "no high-priority
-      // action right now") by returning props._skip. Cleaner than
-      // making the predicate a fat function over post-fetch data.
-      if (props && (props as { _skip?: unknown })._skip) return null;
-      // Slot id uses `__` so the address grammar's `/` separator stays
-      // a 4-segment composite when slot.id is passed as `composition` to
-      // primitives. Otherwise ElementWrapper generates 5-segment IDs and
-      // the registry's suffix-match for reincarnated entities breaks.
+  switch (source_tool) {
+    case TOOL_NAMES.LOOKUP:
+      return narrativeFrom(data, source_tool);
+    case TOOL_NAMES.LIST_ITEMS:
+      return tabularFrom(data, source_tool);
+    case TOOL_NAMES.GET_ALERTS:
+      return alertsFrom(data, source_tool);
+    case TOOL_NAMES.GET_RECENT_EVENTS:
+      return timelineFrom(data, source_tool);
+    default:
       return {
-        id: `${plan.intent}__${rule.id}`,
-        primitive: rule.primitive,
-        source_tool: rule.tool?.name ?? "composer",
-        props,
-        trace,
-        importance: rule.importance + (1 - i / Math.max(1, plan.matched.length)) * 0.001,
+        primitive: "fallback",
+        source_tool,
+        reason: `no primitive registered for tool: ${source_tool}`,
       };
-    })
-    .filter((s): s is SlotSpec => s !== null)
-    .sort((a, b) => b.importance - a.importance);
+  }
+}
 
+function isUiResourceEnvelope(v: unknown): v is UiResourceEnvelope {
+  return (
+    isObject(v) &&
+    v.kind === "ui_resource" &&
+    typeof v.uri === "string" &&
+    typeof v.html === "string"
+  );
+}
+
+// ─── shape guards ───────────────────────────────────────────────────────
+//
+// Each guard validates only what the primitive actually consumes. Extra
+// fields are tolerated — agents may evolve their schemas additively. A
+// failed guard returns a `fallback` selection with a human-readable
+// reason rather than throwing, so the render field can show an honest
+// "couldn't compose this" message.
+
+function narrativeFrom(data: unknown, source_tool: string): PrimitiveSelection {
+  if (isLookupResult(data)) {
+    return { primitive: "narrative", source_tool, markdown: data.markdown };
+  }
   return {
-    intent: plan.intent,
-    slots,
-    watching: plan.watching,
+    primitive: "fallback",
+    source_tool,
+    reason: "lookup payload missing string `markdown`",
   };
 }
 
-export function toolKey(name: string, args?: Record<string, unknown>): string {
-  const a = args ? JSON.stringify(args, Object.keys(args).sort()) : "";
-  return `${name}::${a}`;
-}
-
-// ── Helpers used by rules ────────────────────────────────────────────
-
-/** Lower-case mention search across an array of bullets. */
-export function bulletMentions(
-  bullets: string[],
-  needles: string[],
-): string | null {
-  const lowered = needles.map((n) => n.toLowerCase());
-  for (const b of bullets) {
-    const lb = b.toLowerCase();
-    if (lowered.some((n) => lb.includes(n))) return b;
+function tabularFrom(data: unknown, source_tool: string): PrimitiveSelection {
+  if (isListItemsResult(data)) {
+    return {
+      primitive: "tabular",
+      source_tool,
+      title: data.title,
+      columns: data.columns,
+      rows: data.rows,
+    };
   }
-  return null;
+  return {
+    primitive: "fallback",
+    source_tool,
+    reason: "list_items payload missing valid `columns` / `rows`",
+  };
 }
 
-/** Find the first user.md standing concern bullet that mentions any needle. */
-export function findStandingConcern(
-  user: ParsedDoc | null,
-  needles: string[],
-): string | null {
-  if (!user) return null;
-  return bulletMentions(user.typed.standing_concerns, needles);
+function alertsFrom(data: unknown, source_tool: string): PrimitiveSelection {
+  if (isGetAlertsResult(data)) {
+    return { primitive: "alerts", source_tool, alerts: data.alerts };
+  }
+  return {
+    primitive: "fallback",
+    source_tool,
+    reason: "get_alerts payload missing valid `alerts` array",
+  };
 }
 
-/** Find the first agent.md default bullet that mentions any needle. */
-export function findAgentDefault(
-  agent: ParsedDoc | null,
-  needles: string[],
-): string | null {
-  if (!agent) return null;
-  return bulletMentions(agent.typed.defaults, needles);
+function timelineFrom(data: unknown, source_tool: string): PrimitiveSelection {
+  if (isGetRecentEventsResult(data)) {
+    return { primitive: "timeline", source_tool, events: data.events };
+  }
+  return {
+    primitive: "fallback",
+    source_tool,
+    reason: "get_recent_events payload missing valid `events` array",
+  };
+}
+
+// ─── primitive type guards ──────────────────────────────────────────────
+
+function isObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null;
+}
+
+function isLookupResult(v: unknown): v is LookupResult {
+  return isObject(v) && typeof v.markdown === "string";
+}
+
+function isListItemsResult(v: unknown): v is ListItemsResult {
+  if (!isObject(v)) return false;
+  const cols = v.columns;
+  const rows = v.rows;
+  if (!Array.isArray(cols) || !Array.isArray(rows)) return false;
+  if (
+    !cols.every(
+      (c) =>
+        isObject(c) && typeof c.key === "string" && typeof c.label === "string",
+    )
+  ) {
+    return false;
+  }
+  if (!rows.every((r) => isObject(r))) return false;
+  return true;
+}
+
+const ALERT_SEVERITIES: ReadonlySet<AlertSeverity> = new Set([
+  "info",
+  "warning",
+  "critical",
+]);
+
+function isGetAlertsResult(v: unknown): v is GetAlertsResult {
+  if (!isObject(v)) return false;
+  const alerts = v.alerts;
+  if (!Array.isArray(alerts)) return false;
+  return alerts.every(
+    (a) =>
+      isObject(a) &&
+      typeof a.id === "string" &&
+      typeof a.title === "string" &&
+      typeof a.ts_ms === "number" &&
+      typeof a.severity === "string" &&
+      ALERT_SEVERITIES.has(a.severity as AlertSeverity) &&
+      (a.body === undefined || typeof a.body === "string"),
+  );
+}
+
+function isGetRecentEventsResult(v: unknown): v is GetRecentEventsResult {
+  if (!isObject(v)) return false;
+  const events = v.events;
+  if (!Array.isArray(events)) return false;
+  return events.every(
+    (e) =>
+      isObject(e) &&
+      typeof e.id === "string" &&
+      typeof e.title === "string" &&
+      typeof e.ts_ms === "number" &&
+      (e.description === undefined || typeof e.description === "string") &&
+      (e.kind === undefined || typeof e.kind === "string"),
+  );
 }

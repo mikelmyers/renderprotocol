@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
+    "dev:alpha": "cross-env MOCK_AGENT_NAME=alpha PORT=4717 tsx watch src/index.ts",
+    "dev:beta": "cross-env MOCK_AGENT_NAME=beta PORT=4718 MOCK_TOOLS=lookup,get_alerts,get_recent_events tsx watch src/index.ts",
     "start": "tsx src/index.ts",
     "build": "tsc",
     "typecheck": "tsc --noEmit"
@@ -18,6 +20,7 @@
   "devDependencies": {
     "@types/express": "^5.0.0",
     "@types/node": "^22.7.0",
+    "cross-env": "^7.0.3",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0"
   }

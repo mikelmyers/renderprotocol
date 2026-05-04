@@ -79,13 +79,6 @@ pub struct ToolCallResult {
     pub text: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct ResourceReadResult {
-    pub raw: Value,
-    pub mime_type: Option<String>,
-    pub text: Option<String>,
-}
-
 pub struct McpClient {
     http: reqwest::Client,
     endpoint: String,
@@ -110,9 +103,18 @@ impl McpClient {
     }
 
     pub async fn initialize(&self) -> Result<Value, McpError> {
+        // SEP-1865: declare the MCP Apps extension so servers know we can
+        // render their `ui://` resources. The extension identifier and
+        // mimeType allowlist are spec-mandated.
         let params = json!({
             "protocolVersion": PROTOCOL_VERSION,
-            "capabilities": {},
+            "capabilities": {
+                "extensions": {
+                    "io.modelcontextprotocol/ui": {
+                        "mimeTypes": ["text/html;profile=mcp-app"]
+                    }
+                }
+            },
             "clientInfo": {
                 "name": "renderprotocol-host",
                 "version": "0.0.0",
@@ -164,6 +166,16 @@ impl McpClient {
         Ok(result)
     }
 
+    /// Standard MCP `resources/read`. Returns the raw response (typically
+    /// `{ contents: [...] }`); host-side code applies any further validation
+    /// such as size caps before handing the content to UI primitives.
+    pub async fn read_resource(&self, uri: &str) -> Result<Value, McpError> {
+        let result = self
+            .request("resources/read", Some(json!({ "uri": uri })))
+            .await?;
+        Ok(result)
+    }
+
     pub async fn call_tool(
         &self,
         name: &str,
@@ -189,28 +201,33 @@ impl McpClient {
         Ok(ToolCallResult { raw, structured, text })
     }
 
-    /// Fetch a resource by URI. Used for SEP-1865 `ui://` resources but
-    /// works for any resource the server publishes. Returns the raw
-    /// JSON-RPC `result` (`{ contents: [...] }`) plus a convenience
-    /// extraction of the first content block's text + mime.
-    pub async fn read_resource(&self, uri: &str) -> Result<ResourceReadResult, McpError> {
-        let params = json!({ "uri": uri });
-        let raw = self.request("resources/read", Some(params)).await?;
-        let (mime, text) = raw
-            .get("contents")
-            .and_then(|v| v.as_array())
-            .and_then(|arr| arr.first())
-            .map(|c| {
-                let mime = c.get("mimeType").and_then(Value::as_str).map(str::to_string);
-                let text = c.get("text").and_then(Value::as_str).map(str::to_string);
-                (mime, text)
-            })
-            .unwrap_or((None, None));
-
-        Ok(ResourceReadResult { raw, mime_type: mime, text })
+    /// Wrapper that recovers from session invalidation. The server can lose
+    /// our session for several reasons in practice — server restart (common
+    /// in dev), session expiry, network drop. On a 4xx from the server we
+    /// clear the cached session, call `initialize()` once, and retry the
+    /// request. A second 4xx propagates as an error.
+    ///
+    /// Concurrent re-initializes are not gated; at worst two requests
+    /// re-init in parallel and last write wins. Acceptable for v0; a Notify
+    /// barrier or single-flight pattern lands when production load matters.
+    async fn request(&self, method: &str, params: Option<Value>) -> Result<Value, McpError> {
+        match self.try_request(method, params.clone()).await {
+            Ok(v) => Ok(v),
+            Err(McpError::HttpStatus(status)) if status.is_client_error() => {
+                tracing::info!(
+                    %status,
+                    method,
+                    "session likely invalid; re-initializing and retrying"
+                );
+                *self.session_id.write() = None;
+                self.initialize().await?;
+                self.try_request(method, params).await
+            }
+            Err(e) => Err(e),
+        }
     }
 
-    async fn request(&self, method: &str, params: Option<Value>) -> Result<Value, McpError> {
+    async fn try_request(&self, method: &str, params: Option<Value>) -> Result<Value, McpError> {
         let session = self.session_id.read().clone().ok_or(McpError::NotInitialized)?;
         let id = self.alloc_id();
         let body = JsonRpcRequest { jsonrpc: "2.0", id, method, params };

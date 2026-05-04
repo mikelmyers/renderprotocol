@@ -1,127 +1,48 @@
-import { useMemo, type ReactNode } from "react";
+import { useMemo } from "react";
 import { ElementWrapper } from "../ElementWrapper";
-import { makeElementId, surfaceBus } from "../../../lib/surface-bus";
-import { resolveReference } from "../../../lib/element-registry";
-
-// Generic narrative primitive — agent-authored text with embedded
-// references. References are rendered as inline chips that resolve through
-// the element registry. Clicking a chip emits reference_resolved on the
-// bus; the registry's tombstone path means a chip pointing at an element
-// that no longer mounts still surfaces context (per STRUCTURE.md §5).
-//
-// Markdown support is intentionally tiny for v0: paragraph splitting on
-// blank lines plus inline `[ref:...]` token expansion. Heavier markdown
-// (lists, links, code) arrives when a primitive actually needs it.
+import { makeElementId } from "../../../lib/surface-bus";
+import { SafeMarkdown } from "../../../lib/safe-markdown";
 
 interface Props {
   composition: string;
   source_tool: string;
-  entity: string;
-  body: string;
+  /// Markdown source. Rendered with the shared SafeMarkdown wrapper —
+  /// no raw HTML, URI-allowlisted links, external links opened safely.
+  markdown: string;
 }
 
-export function NarrativeView({
-  composition,
-  source_tool,
-  entity,
-  body,
-}: Props) {
-  const id = useMemo(
+// NarrativeView: the v0 generalist primitive. Renders prose authored by a
+// hosting agent (or by the user agent summarizing across hosting agents).
+// Any tool whose result shape we don't have a specialist primitive for
+// falls back to here via the composer's `fallback` selection.
+
+export function NarrativeView({ composition, source_tool, markdown }: Props) {
+  const elementId = useMemo(
     () =>
       makeElementId({
         composition,
         primitive: "narrative",
         source_tool,
-        entity,
+        entity: "body",
       }),
-    [composition, source_tool, entity],
-  );
-
-  const paragraphs = useMemo(
-    () => body.split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean),
-    [body],
+    [composition, source_tool],
   );
 
   return (
     <ElementWrapper
-      id={id}
+      id={elementId}
       metadata={{
         composition,
         primitive: "narrative",
         source_tool,
-        entity,
-        display: { length: body.length },
+        entity: "body",
+        display: { length: markdown.length },
       }}
       className="narrative-view"
     >
-      {paragraphs.map((p, i) => (
-        <p key={i} className="narrative-view__p">
-          {renderParagraph(p)}
-        </p>
-      ))}
+      <div className="narrative-view__body">
+        <SafeMarkdown>{markdown}</SafeMarkdown>
+      </div>
     </ElementWrapper>
-  );
-}
-
-function renderParagraph(p: string): ReactNode {
-  // Split on `[ref:...]` tokens, preserving order.
-  const parts: ReactNode[] = [];
-  const re = /\[ref:([^\]]+)\]/g;
-  let lastIndex = 0;
-  let match: RegExpExecArray | null;
-  let key = 0;
-  while ((match = re.exec(p)) !== null) {
-    if (match.index > lastIndex) {
-      parts.push(p.slice(lastIndex, match.index));
-    }
-    parts.push(
-      <ReferenceChipInline key={`r-${key++}`} target={match[1]!.trim()} />,
-    );
-    lastIndex = match.index + match[0].length;
-  }
-  if (lastIndex < p.length) parts.push(p.slice(lastIndex));
-  return parts.length > 0 ? parts : p;
-}
-
-function ReferenceChipInline({ target }: { target: string }) {
-  // The full ReferenceChip component (with hover preview, jump-to-element
-  // animation, and the "bring it back?" tombstone CTA) lands when the
-  // conversation panel real version arrives. For v0 this is a minimal
-  // chip that resolves on click and emits the right bus events.
-  const onClick = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    const result = surfaceBus.resolveReference(target);
-    if (result.status === "live") {
-      // Live element — also fire selection so the render field highlights it.
-      surfaceBus.selectElement(
-        result.reincarnated_id ?? target,
-        "conversation_reference",
-      );
-    }
-  };
-  // Snapshot the registry once on render to derive a label and a state.
-  const snapshot = resolveReference(target);
-  const label =
-    (snapshot.metadata?.display?.["title"] as string | undefined) ??
-    (snapshot.metadata?.display?.["callsign"] as string | undefined) ??
-    (snapshot.metadata?.entity as string | undefined) ??
-    target.split("/").pop() ??
-    target;
-  const className =
-    snapshot.status === "live"
-      ? "ref-chip ref-chip--live"
-      : snapshot.status === "tombstoned"
-        ? "ref-chip ref-chip--tombstoned"
-        : "ref-chip ref-chip--unknown";
-  return (
-    <span
-      className={className}
-      onClick={onClick}
-      data-target={target}
-      role="button"
-      tabIndex={0}
-    >
-      {label}
-    </span>
   );
 }

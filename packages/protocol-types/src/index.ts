@@ -1,179 +1,95 @@
 // Shared types between the React frontend and the Node mock-mcp-server.
-// The Rust backend keeps mirror types in src-tauri/src; kept in sync by
-// hand for v0 (small surface, not worth a code-generator yet).
-//
-// Domain: a generic person opening their browser on a Tuesday morning.
-// One mock MCP server pretends to be six services — mail, calendar,
-// messages, news, weather, docs — each exposed as its own tool. The
-// per-tool naming convention (`<service>_<verb>`) lets the host trace
-// which service produced each piece of the morning brief.
+// The Rust backend keeps mirror types in src-tauri/src/protocols/mcp/types.rs;
+// kept in sync by hand for v0 (small surface, not worth a code-generator yet).
 
-// ── Mail ────────────────────────────────────────────────────────────
-
-export type MailFlag = "starred" | "important" | "urgent" | null;
-
-export interface MailThread {
-  thread_id: string;
-  subject: string;
-  from_name: string;
-  from_email: string;
-  preview: string;
-  received_iso: string;
-  unread: boolean;
-  flag: MailFlag;
-}
-
-export interface InboxBriefResult {
-  generated_at_iso: string;
-  unread_count: number;
-  /** Threads the agent surfaces by default — flagged in the seed; ordered
-   *  by the agent's recommended reading order, not strictly chronological. */
-  flagged: MailThread[];
-  /** Most recent unread, regardless of flag. */
-  recent_unread: MailThread[];
-}
-
-// ── Calendar ────────────────────────────────────────────────────────
-
-export type EventStatus = "upcoming" | "in_progress" | "past";
-export type PrepStatus = "ready" | "needs_prep" | "none";
-
-export interface CalendarEvent {
-  event_id: string;
-  title: string;
-  start_iso: string;
-  end_iso: string;
-  location: string | null;
-  attendees: string[];
-  prep_status: PrepStatus;
-  status: EventStatus;
-}
-
-export interface CalendarTodayResult {
-  generated_at_iso: string;
-  events: CalendarEvent[];
-}
-
-// ── Messages ────────────────────────────────────────────────────────
-
-export type ChatChannel =
-  | "slack"
-  | "imessage"
-  | "signal"
-  | "whatsapp"
-  | "discord";
-
-export interface ChatMessage {
-  message_id: string;
-  channel: ChatChannel;
-  conversation: string;
-  preview: string;
-  received_iso: string;
-  unread: boolean;
-}
-
-export interface MessagesRecentResult {
-  generated_at_iso: string;
-  unread_count: number;
-  messages: ChatMessage[];
-}
-
-// ── News ────────────────────────────────────────────────────────────
-
-export interface NewsItem {
-  item_id: string;
-  source: string;
-  title: string;
-  summary: string;
-  url: string;
-  published_iso: string;
-  topics: string[];
-}
-
-export interface NewsFollowingResult {
-  generated_at_iso: string;
-  items: NewsItem[];
-}
-
-// ── Weather ─────────────────────────────────────────────────────────
-
-export interface WeatherForecastEntry {
-  hour_iso: string;
-  temp_f: number;
-  condition: string;
-  precip_pct: number;
-}
-
-export interface WeatherCurrent {
-  temp_f: number;
-  feels_like_f: number;
-  condition: string;
-  humidity_pct: number;
-  wind_mph: number;
-}
-
-export interface WeatherLocalResult {
-  generated_at_iso: string;
-  location: string;
-  current: WeatherCurrent;
-  forecast_hourly: WeatherForecastEntry[];
-  high_f: number;
-  low_f: number;
-  /** Plain-English summary that captures the actionable change for today
-   *  ("rain after lunch"). The composer uses this to craft an alert tone. */
-  headline: string;
-  /** "ok" — clear or pleasant; "warn" — rain or significant change; "critical"
-   *  — severe weather. Drives the AlertView tone in the brief. */
-  alert_level: "ok" | "warn" | "critical";
-}
-
-// ── Docs ────────────────────────────────────────────────────────────
-
-export type DocSource = "google_docs" | "notion" | "local" | "github";
-
-export interface DocItem {
-  doc_id: string;
-  source: DocSource;
-  title: string;
-  preview: string;
-  edited_iso: string;
-  shared_with: string[];
-}
-
-export interface DocsRecentResult {
-  generated_at_iso: string;
-  docs: DocItem[];
-}
-
-// ── Tool registry ───────────────────────────────────────────────────
-
+// Tool name registry — names live as a const so frontend, sidecar, and Rust
+// all reference the same string. Cross-language sync is by convention.
 export const TOOL_NAMES = {
-  MAIL_GET_INBOX: "mail_get_inbox",
-  CALENDAR_GET_TODAY: "calendar_get_today",
-  MESSAGES_GET_RECENT: "messages_get_recent",
-  NEWS_GET_FOLLOWING: "news_get_following",
-  WEATHER_GET_LOCAL: "weather_get_local",
-  DOCS_GET_RECENT: "docs_get_recent",
-  // Domain-agnostic action recorder; survived the scenario pivot.
-  RECORD_ACTION: "record_action",
+  LOOKUP: "lookup",
+  LIST_ITEMS: "list_items",
+  GET_ALERTS: "get_alerts",
+  GET_RECENT_EVENTS: "get_recent_events",
+  WIDGET: "widget",
 } as const;
 
 export type ToolName = (typeof TOOL_NAMES)[keyof typeof TOOL_NAMES];
 
-// ── MCP Apps (SEP-1865) UI resources ────────────────────────────────
+// ─── lookup ──────────────────────────────────────────────────────────────
+// A hosting agent answers a free-text query with a markdown blob. Closest
+// shape to "user expresses intent, carrier returns rankable results."
+// In v0 the mock server is the only hosting agent and the carrier is a
+// passthrough; later, multiple hosting agents implement this same tool
+// surface and the carrier ranks between them.
 
-export const UI_RESOURCE_URIS = {
-  HELLO: "ui://renderprotocol/hello",
-} as const;
+export interface LookupArgs {
+  query: string;
+}
 
-// Envelope for postMessage between an MCP App iframe and the host.
-// The wire shape here is the one we control on our side; the actual
-// SEP-1865 envelope is a superset and may carry more fields. We keep
-// this minimal and ignore anything we don't recognize.
-export interface McpAppMessage {
-  source: "mcp-app";
-  // Free-form for v0. Future: align with the JSON-RPC subset SEP-1865
-  // defines for iframe-to-host RPC.
-  type: string;
-  payload?: unknown;
+export interface LookupResult {
+  markdown: string;
+}
+
+// ─── list_items ──────────────────────────────────────────────────────────
+// Tabular response. The agent returns a column schema plus rows. Cell
+// values are scalar — primitives don't render nested structures inline.
+
+export interface ListItemsArgs {
+  query?: string;
+}
+
+export interface TableColumn {
+  key: string;
+  label: string;
+}
+
+export type TableCell = string | number | boolean | null;
+export type TableRow = Record<string, TableCell>;
+
+export interface ListItemsResult {
+  title?: string;
+  columns: TableColumn[];
+  rows: TableRow[];
+}
+
+// ─── get_alerts ──────────────────────────────────────────────────────────
+// A list of items needing attention. Severity drives color coding in the
+// AlertView primitive.
+
+export type AlertSeverity = "info" | "warning" | "critical";
+
+export interface AlertItem {
+  id: string;
+  severity: AlertSeverity;
+  title: string;
+  /// Optional markdown body for context (rendered safely by the host).
+  body?: string;
+  ts_ms: number;
+}
+
+export interface GetAlertsArgs {
+  query?: string;
+}
+
+export interface GetAlertsResult {
+  alerts: AlertItem[];
+}
+
+// ─── get_recent_events ───────────────────────────────────────────────────
+// Sequence of events with timestamps. TimelineView renders them vertically.
+
+export interface TimelineEvent {
+  id: string;
+  ts_ms: number;
+  title: string;
+  description?: string;
+  /// Free-form category; used for color/icon coding by the primitive.
+  kind?: string;
+}
+
+export interface GetRecentEventsArgs {
+  query?: string;
+}
+
+export interface GetRecentEventsResult {
+  events: TimelineEvent[];
 }

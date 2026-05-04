@@ -1,27 +1,31 @@
-// Tauri commands for the configuration substrate.
+// Tauri commands the React frontend invokes to read the current parsed
+// state of `agent.md` and `user.md`. The watcher (see config_watcher.rs)
+// owns updates; these commands only read from the in-memory store.
 //
-// Read-only from the surface in v0 (the user edits markdown files
-// directly; the watcher reloads them). The only write is
-// `config_set_active_agent`, which selects which `agent.md` is the
-// active operating contract.
+// Returning Option<ParsedDocument> rather than erroring on a missing file
+// lets the frontend distinguish "config not present yet" from "config
+// failed to load" (which would emit a warning event and keep the last
+// good value).
 
 use tauri::State;
 
-use crate::config_store::ConfigSnapshot;
+use crate::config_parser::ParsedDocument;
 use crate::AppState;
 
 #[tauri::command]
-pub fn config_snapshot(state: State<'_, AppState>) -> ConfigSnapshot {
-    state.config.snapshot()
+pub fn current_agent_md(state: State<'_, AppState>) -> Result<Option<ParsedDocument>, String> {
+    let s = state
+        .config
+        .lock()
+        .map_err(|e| format!("config store lock poisoned: {e}"))?;
+    Ok(s.agent.clone())
 }
 
 #[tauri::command]
-pub fn config_set_active_agent(
-    state: State<'_, AppState>,
-    key: String,
-) -> Result<ConfigSnapshot, String> {
-    if !state.config.set_active_agent(&key) {
-        return Err(format!("agent '{}' is not loaded", key));
-    }
-    Ok(state.config.snapshot())
+pub fn current_user_md(state: State<'_, AppState>) -> Result<Option<ParsedDocument>, String> {
+    let s = state
+        .config
+        .lock()
+        .map_err(|e| format!("config store lock poisoned: {e}"))?;
+    Ok(s.user.clone())
 }

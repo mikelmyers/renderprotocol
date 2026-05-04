@@ -1,99 +1,65 @@
 import { useMemo } from "react";
+import type { AlertItem } from "@renderprotocol/protocol-types";
 import { ElementWrapper } from "../ElementWrapper";
 import { makeElementId } from "../../../lib/surface-bus";
-
-// Generic alert / indicator primitive. One prominent statement with optional
-// detail and metadata. Domain shape (weather window, anomaly alert, system
-// notice) is mapped onto this shape by composition rules.
-
-export type AlertTone = "ok" | "warn" | "critical" | "info" | "neutral";
-
-export interface AlertAction {
-  id: string;
-  label: string;
-  intent: "primary" | "secondary";
-}
+import { SafeMarkdown } from "../../../lib/safe-markdown";
+import { relativeTime } from "../../../lib/relative-time";
 
 interface Props {
-  composition: string;
   source_tool: string;
-  // Stable identifier within the composition (e.g. "weather-window",
-  // "drone-7-anomaly"). Joined with the rest of the address grammar
-  // to form the full element_id.
-  entity: string;
-  tone: AlertTone;
-  headline: string;
-  detail?: string;
-  meta?: Record<string, string>;
-  actions?: AlertAction[];
-  onAction?: (action_id: string) => void;
+  alerts: AlertItem[];
 }
 
-export function AlertView({
-  composition,
-  source_tool,
-  entity,
-  tone,
-  headline,
-  detail,
-  meta,
-  actions,
-  onAction,
-}: Props) {
-  const id = useMemo(
+// AlertView: stack of severity-coded cards for items needing attention.
+// Optional markdown body rendered with the same safe defaults as
+// NarrativeView — no raw HTML, URI-allowlisted links.
+
+export function AlertView({ source_tool, alerts }: Props) {
+  const containerId = useMemo(
     () =>
       makeElementId({
-        composition,
-        primitive: "alert",
+        composition: "ask",
+        primitive: "alerts",
         source_tool,
-        entity,
+        entity: "container",
       }),
-    [composition, source_tool, entity],
+    [source_tool],
   );
 
   return (
     <ElementWrapper
-      id={id}
+      id={containerId}
       metadata={{
-        composition,
-        primitive: "alert",
+        composition: "ask",
+        primitive: "alerts",
         source_tool,
-        entity,
-        display: { tone, headline },
+        entity: "container",
+        display: { count: alerts.length },
       }}
-      className={`alert-view alert-view--${tone}`}
+      className="alert-view"
     >
-      <div className="alert-view__bar" />
-      <div className="alert-view__body">
-        <div className="alert-view__headline">{headline}</div>
-        {detail && <div className="alert-view__detail">{detail}</div>}
-        {meta && Object.keys(meta).length > 0 && (
-          <div className="alert-view__meta">
-            {Object.entries(meta).map(([k, v]) => (
-              <div className="alert-view__meta-kv" key={k}>
-                <span className="alert-view__meta-k">{k}</span>
-                <span className="alert-view__meta-v">{v}</span>
-              </div>
-            ))}
+      {alerts.length === 0 && (
+        <div className="alert-view__empty">No alerts.</div>
+      )}
+      {alerts.map((a) => (
+        <div
+          key={a.id}
+          className={`alert-card alert-card--${a.severity}`}
+        >
+          <div className="alert-card__header">
+            <span className={`alert-card__severity alert-card__severity--${a.severity}`}>
+              {a.severity}
+            </span>
+            <span className="alert-card__title">{a.title}</span>
+            <span className="alert-card__time">{relativeTime(a.ts_ms)}</span>
           </div>
-        )}
-        {actions && actions.length > 0 && (
-          <div className="alert-view__actions">
-            {actions.map((a) => (
-              <button
-                key={a.id}
-                className={`alert-view__action alert-view__action--${a.intent}`}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onAction?.(a.id);
-                }}
-              >
-                {a.label}
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
+          {a.body && (
+            <div className="alert-card__body">
+              <SafeMarkdown>{a.body}</SafeMarkdown>
+            </div>
+          )}
+        </div>
+      ))}
     </ElementWrapper>
   );
 }

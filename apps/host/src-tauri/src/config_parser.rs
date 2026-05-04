@@ -1,118 +1,72 @@
-// Pragmatic markdown section parser for `agent.md` / `user.md` files.
+// Markdown config parser for `agent.md` and `user.md`.
 //
-// The contract is loose by design: the surface trusts the human who wrote
-// the file. We extract:
-//   - the H1 title (if any) as the document name
-//   - each H2 heading as a section, with the body text below it (until the
-//     next H2 or end of document) preserved verbatim
-//   - a small typed view for known sections (Defaults, Permissions, Carriers,
-//     Audit, Standing concerns) that the composer cares about
+// v0 surface needs: the document's title (first H1) and its sections
+// (split by `## ` headings). Sections carry verbatim markdown bodies that
+// the React side renders via react-markdown. We don't render markdown in
+// Rust — that's the frontend's job.
 //
-// Sections we don't recognize are still surfaced via the `sections` map so
-// future composer rules can read them without changing the parser. Heavier
-// schemas (front-matter, YAML) are deferred — the right moment for those is
-// when a real consumer of the structured data demands them.
+// Parser is intentionally tiny: any text input parses successfully. There
+// is no malformed-input error path because there is no schema we enforce.
+// A file with no headings yields title=None, sections=[], body=raw.
 
-use std::collections::BTreeMap;
+use serde::Serialize;
 
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ParsedDoc {
+#[derive(Debug, Clone, Serialize)]
+pub struct ParsedDocument {
+    /// First H1 heading text, if any.
     pub title: Option<String>,
-    /// Heading text → section body, preserved in document order.
+    /// Verbatim markdown body. The frontend renders this via react-markdown.
+    pub body: String,
+    /// H2-delimited sections in document order.
     pub sections: Vec<Section>,
-    /// Convenience map for lookup by lowercased heading.
-    pub sections_by_key: BTreeMap<String, String>,
-    /// Known typed slices the composer reads directly.
-    pub typed: TypedView,
-    /// Full original text. Hot-reload UIs may render this verbatim.
-    pub raw: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Section {
     pub heading: String,
+    /// Verbatim markdown for the section content (between this heading and
+    /// the next H2 or end of document). Heading line itself is excluded.
     pub body: String,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct TypedView {
-    /// Bullet items under "Defaults".
-    pub defaults: Vec<String>,
-    /// Bullet items under "Standing concerns".
-    pub standing_concerns: Vec<String>,
-    /// Permissions rules — each line normalized as `kind: rule`.
-    pub permissions: Vec<String>,
-    /// Carrier directives — each line normalized.
-    pub carriers: Vec<String>,
-    /// Audit policy bullets.
-    pub audit: Vec<String>,
-}
+/// Parse a markdown config document. Always succeeds.
+pub fn parse(contents: &str) -> ParsedDocument {
+    let mut title: Option<String> = None;
+    let mut sections: Vec<Section> = Vec::new();
+    let mut current: Option<(String, Vec<&str>)> = None;
 
-pub fn parse(text: &str) -> ParsedDoc {
-    let mut doc = ParsedDoc {
-        raw: text.to_string(),
-        ..ParsedDoc::default()
-    };
-
-    let mut current_heading: Option<String> = None;
-    let mut current_body: Vec<&str> = Vec::new();
-    let mut flush = |heading: Option<String>, body: Vec<&str>, doc: &mut ParsedDoc| {
-        if let Some(h) = heading {
-            let body_text = body.join("\n").trim_end_matches('\n').to_string();
-            doc.sections_by_key
-                .insert(h.to_lowercase(), body_text.clone());
-            doc.sections.push(Section {
-                heading: h,
-                body: body_text,
-            });
-        }
-    };
-
-    for line in text.lines() {
-        let trimmed = line.trim_end();
-        if let Some(rest) = trimmed.strip_prefix("# ") {
-            // H1 — document title. Only the first one wins; subsequent
-            // H1s are unlikely in well-formed docs but tolerated as
-            // section content if they appear.
-            if doc.title.is_none() {
-                doc.title = Some(rest.trim().to_string());
+    for line in contents.lines() {
+        if title.is_none() {
+            if let Some(rest) = line.strip_prefix("# ") {
+                title = Some(rest.trim().to_string());
                 continue;
             }
         }
-        if let Some(rest) = trimmed.strip_prefix("## ") {
-            // Close out the previous section, start a new one.
-            flush(current_heading.take(), std::mem::take(&mut current_body), &mut doc);
-            current_heading = Some(rest.trim().to_string());
-            continue;
-        }
-        if current_heading.is_some() {
-            current_body.push(line);
+        if let Some(rest) = line.strip_prefix("## ") {
+            if let Some((heading, body_lines)) = current.take() {
+                sections.push(Section {
+                    heading,
+                    body: body_lines.join("\n").trim_end().to_string(),
+                });
+            }
+            current = Some((rest.trim().to_string(), Vec::new()));
+        } else if let Some((_, ref mut body_lines)) = current {
+            body_lines.push(line);
         }
     }
-    flush(current_heading.take(), current_body, &mut doc);
 
-    // Build the typed view from known sections.
-    doc.typed.defaults = bullets(&doc, "defaults");
-    doc.typed.standing_concerns = bullets(&doc, "standing concerns");
-    doc.typed.permissions = bullets(&doc, "permissions");
-    doc.typed.carriers = bullets(&doc, "carriers");
-    doc.typed.audit = bullets(&doc, "audit");
+    if let Some((heading, body_lines)) = current.take() {
+        sections.push(Section {
+            heading,
+            body: body_lines.join("\n").trim_end().to_string(),
+        });
+    }
 
-    doc
-}
-
-fn bullets(doc: &ParsedDoc, key: &str) -> Vec<String> {
-    let Some(body) = doc.sections_by_key.get(key) else {
-        return Vec::new();
-    };
-    body.lines()
-        .map(str::trim)
-        .filter(|l| l.starts_with("- ") || l.starts_with("* "))
-        .map(|l| l.trim_start_matches(['-', '*']).trim().to_string())
-        .filter(|l| !l.is_empty())
-        .collect()
+    ParsedDocument {
+        title,
+        body: contents.to_string(),
+        sections,
+    }
 }
 
 #[cfg(test)]
@@ -120,18 +74,46 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_title_and_sections() {
-        let text = "# My Agent\n\n## Defaults\n- a\n- b\n\n## Permissions\n- read: all\n";
-        let doc = parse(text);
-        assert_eq!(doc.title.as_deref(), Some("My Agent"));
-        assert_eq!(doc.typed.defaults, vec!["a", "b"]);
-        assert_eq!(doc.typed.permissions, vec!["read: all"]);
+    fn empty_input_parses_to_empty_doc() {
+        let p = parse("");
+        assert!(p.title.is_none());
+        assert!(p.sections.is_empty());
+        assert_eq!(p.body, "");
     }
 
     #[test]
-    fn keeps_unknown_sections() {
-        let text = "## Whatever\nbody\n";
-        let doc = parse(text);
-        assert!(doc.sections_by_key.contains_key("whatever"));
+    fn no_headings_keeps_body_only() {
+        let p = parse("just a line\nand another");
+        assert!(p.title.is_none());
+        assert!(p.sections.is_empty());
+        assert_eq!(p.body, "just a line\nand another");
+    }
+
+    #[test]
+    fn extracts_title_and_sections() {
+        let input = "# Agent Name\n\n## Purpose\nDo good.\n\n## Defaults\n- Be calm.\n";
+        let p = parse(input);
+        assert_eq!(p.title.as_deref(), Some("Agent Name"));
+        assert_eq!(p.sections.len(), 2);
+        assert_eq!(p.sections[0].heading, "Purpose");
+        assert!(p.sections[0].body.contains("Do good."));
+        assert_eq!(p.sections[1].heading, "Defaults");
+        assert!(p.sections[1].body.contains("- Be calm."));
+    }
+
+    #[test]
+    fn second_h1_is_not_treated_as_title() {
+        let p = parse("# First\n\n# Second\n");
+        assert_eq!(p.title.as_deref(), Some("First"));
+    }
+
+    #[test]
+    fn content_before_first_h2_after_title_is_dropped_from_sections() {
+        // v0 behavior: only H2-introduced text becomes a section. Preamble
+        // between H1 and the first H2 lives only in `body`. Worth knowing
+        // when designing config templates.
+        let p = parse("# Title\n\nSome preamble.\n\n## First Section\nbody\n");
+        assert_eq!(p.sections.len(), 1);
+        assert!(p.body.contains("Some preamble."));
     }
 }

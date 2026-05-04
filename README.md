@@ -24,15 +24,15 @@ In priority order:
 2. **Composition over templates.** The render field assembles views from structured data using a primitive vocabulary: map, timeline, alert, narrative summary, table, live feed (mocked).
 3. **`agent.md` / `user.md` configuration substrate.** Real markdown files in the repo, read on startup, governing defaults (what shows on open, what to surface, what requires approval). Editable and reloadable without restart.
 4. **Honest MCP Apps integration.** Host calls an MCP server, receives structured data, renders UI resources via the `ui://` URI scheme per SEP-1865, and handles bidirectional JSON-RPC. A single mock MCP server is fine for v0 — the protocol must not be shortcut.
-5. **Morning brief composition.** On open with the Personal agent loaded, the render field composes a default view from multiple "services" (mail flagged + recent, today's calendar, recent messages across chat apps, news from followed feeds, local weather, recently edited docs) before any user input. The agent writes a 2–3 sentence summary in the conversation panel.
-6. **Recompose on change.** A new urgent email or a meeting starting in ten minutes reorganizes the render field: focus moves up, the relevant card highlights, the agent narrates the change in chat. Approve/reject on suggested actions is logged. All steps are observable and replayable in an audit log.
+5. **Morning brief composition.** On open with the Primordia operations agent loaded, the render field composes a default view from multiple sources (drone fleet map, anomalies timeline, weather indicator, customer reports list) before any user input. The agent writes a 2–3 sentence summary in the conversation panel.
+6. **Drone anomaly scenario.** Injecting a simulated vibration anomaly on Drone 7 reorganizes the render field: focus on Drone 7, telemetry timeline, baseline comparison, recommended action with confidence. Follow-ups work in the conversation panel. Approve/reject is logged. All steps are observable and replayable in an audit log.
 
 ## Explicit non-goals for v0
 
 Do not build, and stop and ask if reaching for any of these:
 
 - Carrier layer (discovery, ranking, routing)
-- Real-world integrations against live mail / calendar / messaging / news APIs (the mock MCP server stands in for all six "services")
+- Real drone hardware integration
 - Real-time hard-latency guarantees
 - Multi-tenant onboarding
 - Payment integration (x402, ACP, MPP)
@@ -53,7 +53,7 @@ Do not build, and stop and ask if reaching for any of these:
 
 1. The three `docs/` files land in the repo.
 2. A project structure is proposed (directory layout, key files, data flow, mock MCP shape, open architectural questions) — **no code yet**.
-3. After agreement on structure, build incrementally so each step produces something runnable: two-pane shell → composition with mock data → honest MCP integration → morning brief → recompose-on-change scenario.
+3. After agreement on structure, build incrementally so each step produces something runnable: two-pane shell → composition with mock data → honest MCP integration → morning brief → anomaly scenario.
 
 ## Working norms
 

@@ -1,33 +1,57 @@
 import { useEffect, useState } from "react";
-import { TOOL_NAMES } from "@renderprotocol/protocol-types";
 import { ipc } from "../../lib/ipc";
-import { useComposition } from "../../lib/use-composition";
-import type { LayoutSpec, SlotSpec, TraceSource, WatchingItem } from "../../lib/composer";
-import { TimelineView, type TimelineEvent } from "./primitives/TimelineView";
-import { AlertView, type AlertAction, type AlertTone } from "./primitives/AlertView";
-import { TabularView, type TabularColumn, type TabularRow } from "./primitives/TabularView";
-import { LiveFeedView, type LiveSample } from "./primitives/LiveFeedView";
-import { ActionCard, type ActionCardProps } from "./primitives/ActionCard";
+import { useActiveComposition } from "../../lib/active-composition";
+import { compose, type PrimitiveSelection } from "../../lib/composer";
+import { NarrativeView } from "./primitives/NarrativeView";
+import { TabularView } from "./primitives/TabularView";
+import { AlertView } from "./primitives/AlertView";
+import { TimelineView } from "./primitives/TimelineView";
 import { McpAppFrame } from "./primitives/McpAppFrame";
+import { AttributionChip } from "./AttributionChip";
 
-// Composition-driven render field. Used to be a hand-wired showcase;
-// now it interprets a LayoutSpec produced by the composer. The slot →
-// primitive mapping lives in renderSlot below — that single function
-// is the only place primitive identity is bound.
-
-const ACTIVE_INTENT = "morning_brief";
+// RenderField: the right pane. Reads the active composition (set by the
+// user agent in the conversation panel after a tool call), runs it through
+// the composer, and switch-renders the selected primitive.
+//
+// Primitive choice is the composer's job. This component owns layout +
+// connection lifecycle only. Adding a new primitive: extend
+// PrimitiveSelection in composer.ts, build the component, add a case to
+// the switch below. No other touch points.
 
 type ConnectionState = "connecting" | "ready" | "error";
 
 export function RenderField() {
   const [connection, setConnection] = useState<ConnectionState>("connecting");
   const [connectionMessage, setConnectionMessage] = useState<string | null>(null);
+  const current = useActiveComposition((s) => s.current);
 
   useEffect(() => {
+    let cancelled = false;
     let unsubReady: (() => void) | null = null;
     let unsubError: (() => void) | null = null;
+
+    // Resolve the startup race: if MCP initialized before this component
+    // mounted, the `mcp:ready` event is already in the past. Query the
+    // current state from Rust as the source of truth, then continue
+    // listening for future transitions.
+    void ipc
+      .mcpStatus()
+      .then((s) => {
+        if (cancelled) return;
+        if (s.state === "ready") {
+          setConnection("ready");
+        } else if (s.state === "error") {
+          setConnection("error");
+          setConnectionMessage(s.message);
+        }
+      })
+      .catch((e) => {
+        if (!cancelled) console.warn("[RenderField] mcp_status failed", e);
+      });
+
     void ipc.onMcpReady(() => setConnection("ready")).then((u) => {
-      unsubReady = u;
+      if (cancelled) u();
+      else unsubReady = u;
     });
     void ipc
       .onMcpError((msg) => {
@@ -35,260 +59,117 @@ export function RenderField() {
         setConnectionMessage(msg);
       })
       .then((u) => {
-        unsubError = u;
+        if (cancelled) u();
+        else unsubError = u;
       });
+
     return () => {
+      cancelled = true;
       unsubReady?.();
       unsubError?.();
     };
   }, []);
 
-  const { layout, status, error } = useComposition(ACTIVE_INTENT, connection === "ready");
+  const selection = current ? compose(current) : null;
 
   return (
     <div className="render-field">
       <ConnectionStrip state={connection} message={connectionMessage} />
-      <div className="pane__body render-field__stack">
-        {status === "config-pending" && (
+      <div className="pane__body">
+        {!selection && connection === "ready" && (
           <div className="render-field__empty">
-            Waiting for an active <code>agent.md</code> contract…
+            Ask your agent something to compose a view.
           </div>
         )}
-
-        {status === "fetching" && (
-          <div className="render-field__empty">Composing morning brief…</div>
-        )}
-
-        {status === "error" && (
-          <div className="render-field__empty render-field__empty--error">
-            Composition failed: {error ?? "unknown error"}
+        {!selection && connection !== "ready" && (
+          <div className="render-field__empty">
+            {connection === "connecting"
+              ? "Waiting for hosting agent…"
+              : `Hosting agent unavailable: ${connectionMessage ?? "unknown error"}`}
           </div>
         )}
-
-        {status === "ready" && layout && <LayoutRenderer layout={layout} />}
+        {selection && current && (
+          <div className="composition">
+            {current.served_by && (
+              <AttributionChip
+                agent={current.served_by}
+                latencyMs={current.latency_ms}
+              />
+            )}
+            <SelectedPrimitive selection={selection} />
+          </div>
+        )}
       </div>
     </div>
   );
 }
 
-function LayoutRenderer({ layout }: { layout: LayoutSpec }) {
-  return (
-    <>
-      {layout.slots.map((slot) => (
-        <SlotFrame key={slot.id} slot={slot}>
-          {renderSlot(slot)}
-        </SlotFrame>
-      ))}
-      {layout.watching.length > 0 && <Watching items={layout.watching} />}
-    </>
-  );
-}
-
-function SlotFrame({ slot, children }: { slot: SlotSpec; children: React.ReactNode }) {
-  return (
-    <section className="composition-slot">
-      <header className="composition-slot__head">
-        <h2 className="composition-slot__title">{titleFor(slot)}</h2>
-        <TraceTag trace={slot.trace.reason} source={slot.trace.source} />
-      </header>
-      {children}
-    </section>
-  );
-}
-
-function TraceTag({ trace, source }: { trace: string; source: TraceSource }) {
-  const label =
-    source.kind === "user_md"
-      ? "user.md"
-      : source.kind === "agent_md"
-        ? "agent.md"
-        : "default";
-  return (
-    <span className={`composition-trace composition-trace--${source.kind}`} title={trace}>
-      <span className="composition-trace__source">{label}</span>
-      <span className="composition-trace__reason">{trace}</span>
-    </span>
-  );
-}
-
-function Watching({ items }: { items: WatchingItem[] }) {
-  return (
-    <section className="composition-slot composition-slot--watching">
-      <header className="composition-slot__head">
-        <h2 className="composition-slot__title">Watching</h2>
-        <span className="composition-trace composition-trace--default">
-          <span className="composition-trace__reason">
-            Concerns from user.md without a tool match yet
-          </span>
-        </span>
-      </header>
-      <ul className="watching__list">
-        {items.map((item, i) => (
-          <li className="watching__item" key={i}>
-            <span className="watching__dot" />
-            <span className="watching__label">{item.label}</span>
-            <span className="watching__hint">no tool connected</span>
-          </li>
-        ))}
-      </ul>
-    </section>
-  );
-}
-
-// ── Slot dispatcher ──────────────────────────────────────────────────
-
-interface TimelineProps { events: TimelineEvent[] }
-interface AlertProps {
-  tone: AlertTone;
-  headline: string;
-  detail?: string;
-  meta?: Record<string, string>;
-  actions?: AlertAction[];
-}
-interface TableProps { columns: TabularColumn[]; rows: TabularRow[] }
-interface LiveFeedProps {
-  entity: string;
-  label: string;
-  unit?: string;
-  samples: LiveSample[];
-  subscribeTopic?: string;
-  threshold?: { warn?: number; critical?: number };
-}
-
-type ActionCardSlotProps = Omit<
-  ActionCardProps,
-  "composition" | "source_tool" | "entity"
-> & { entity?: string };
-
-interface McpAppSlotProps {
-  uri: string;
-  title?: string;
-  initialHeight?: number;
-}
-
-function renderSlot(slot: SlotSpec): React.ReactNode {
-  // Each `as unknown as XxxProps` cast bypasses TS's two-way overlap check
-  // — slot.props is the engine's `Record<string, unknown>` bag, populated
-  // by the rule's buildProps. The dispatcher trusts the rule/primitive
-  // contract authored alongside it.
-  switch (slot.primitive) {
-    case "timeline": {
-      const p = slot.props as unknown as TimelineProps;
+// Single switch site mirroring the PrimitiveSelection tagged union. Each
+// case is exhaustive on the discriminator; TypeScript flags a missed
+// primitive at compile time.
+function SelectedPrimitive({ selection }: { selection: PrimitiveSelection }) {
+  switch (selection.primitive) {
+    case "narrative":
       return (
-        <TimelineView composition={slot.id} source_tool={slot.source_tool} events={p.events} />
-      );
-    }
-    case "alert": {
-      const p = slot.props as unknown as AlertProps;
-      return (
-        <AlertView
-          composition={slot.id}
-          source_tool={slot.source_tool}
-          entity="indicator"
-          tone={p.tone}
-          headline={p.headline}
-          {...(p.detail !== undefined ? { detail: p.detail } : {})}
-          {...(p.meta !== undefined ? { meta: p.meta } : {})}
-          {...(p.actions !== undefined ? { actions: p.actions } : {})}
+        <NarrativeView
+          composition="ask"
+          source_tool={selection.source_tool}
+          markdown={selection.markdown}
         />
       );
-    }
-    case "table": {
-      const p = slot.props as unknown as TableProps;
+    case "tabular":
       return (
         <TabularView
-          composition={slot.id}
-          source_tool={slot.source_tool}
-          columns={p.columns}
-          rows={p.rows}
+          source_tool={selection.source_tool}
+          title={selection.title}
+          columns={selection.columns}
+          rows={selection.rows}
         />
       );
-    }
-    case "live_feed": {
-      const p = slot.props as unknown as LiveFeedProps;
+    case "alerts":
       return (
-        <LiveFeedView
-          composition={slot.id}
-          source_tool={slot.source_tool}
-          entity={p.entity}
-          label={p.label}
-          {...(p.unit !== undefined ? { unit: p.unit } : {})}
-          samples={p.samples}
-          {...(p.subscribeTopic !== undefined ? { subscribeTopic: p.subscribeTopic } : {})}
-          {...(p.threshold !== undefined ? { threshold: p.threshold } : {})}
+        <AlertView
+          source_tool={selection.source_tool}
+          alerts={selection.alerts}
         />
       );
-    }
-    case "action_card": {
-      const p = slot.props as unknown as ActionCardSlotProps;
+    case "timeline":
       return (
-        <ActionCard
-          composition={slot.id}
-          source_tool={slot.source_tool}
-          entity={p.entity ?? "action"}
-          action_id={p.action_id}
-          headline={p.headline}
-          {...(p.detail !== undefined ? { detail: p.detail } : {})}
-          {...(p.meta !== undefined ? { meta: p.meta } : {})}
-          {...(p.confidence !== undefined ? { confidence: p.confidence } : {})}
-          {...(p.tool !== undefined ? { tool: p.tool } : {})}
-          {...(p.payload !== undefined ? { payload: p.payload } : {})}
-          {...(p.approve_label !== undefined ? { approve_label: p.approve_label } : {})}
-          {...(p.reject_label !== undefined ? { reject_label: p.reject_label } : {})}
+        <TimelineView
+          source_tool={selection.source_tool}
+          events={selection.events}
         />
       );
-    }
-    case "mcp_app": {
-      const p = slot.props as unknown as McpAppSlotProps;
+    case "mcp_app":
       return (
         <McpAppFrame
-          composition={slot.id}
-          source_tool={slot.source_tool}
-          entity="frame"
-          uri={p.uri}
-          {...(p.title !== undefined ? { title: p.title } : {})}
-          {...(p.initialHeight !== undefined ? { initialHeight: p.initialHeight } : {})}
+          source_tool={selection.source_tool}
+          uri={selection.uri}
+          html={selection.html}
+          csp={selection.csp}
+          permissions={selection.permissions}
+          prefersBorder={selection.prefersBorder}
+          toolResult={selection.toolResult}
         />
       );
-    }
-    case "narrative":
-      // Narrative renders in the conversation panel.
-      return null;
-  }
-  void (slot.primitive satisfies never);
-  return null;
-}
-
-function titleFor(slot: SlotSpec): string {
-  // Service label by source_tool — the most natural framing for the
-  // brief, since each "service" backs one or more slots.
-  switch (slot.source_tool) {
-    case TOOL_NAMES.MAIL_GET_INBOX:
-      return slot.primitive === "action_card" ? "Suggested reply" : "Mail";
-    case TOOL_NAMES.CALENDAR_GET_TODAY:
-      return "Calendar";
-    case TOOL_NAMES.MESSAGES_GET_RECENT:
-      return "Messages";
-    case TOOL_NAMES.NEWS_GET_FOLLOWING:
-      return "News";
-    case TOOL_NAMES.WEATHER_GET_LOCAL:
-      return "Weather";
-    case TOOL_NAMES.DOCS_GET_RECENT:
-      return "Docs";
-  }
-  switch (slot.primitive) {
-    case "mcp_app":
-      return "MCP app";
-    case "narrative":
-      return "Narrative";
-    case "action_card":
-      return "Suggested action";
-    default:
-      return slot.primitive;
+    case "fallback":
+      return (
+        <NarrativeView
+          composition="ask"
+          source_tool={selection.source_tool}
+          markdown={`_Couldn't compose a view: ${selection.reason}_`}
+        />
+      );
   }
 }
 
-function ConnectionStrip({ state, message }: { state: ConnectionState; message: string | null }) {
+function ConnectionStrip({
+  state,
+  message,
+}: {
+  state: ConnectionState;
+  message: string | null;
+}) {
   const dotClass =
     state === "ready"
       ? "connection-dot connection-dot--ready"
@@ -297,10 +178,10 @@ function ConnectionStrip({ state, message }: { state: ConnectionState; message: 
         : "connection-dot";
   const label =
     state === "ready"
-      ? "MCP connected"
+      ? "Hosting agent connected"
       : state === "error"
-        ? `MCP error${message ? `: ${message}` : ""}`
-        : "MCP connecting…";
+        ? `Hosting agent error${message ? `: ${message}` : ""}`
+        : "Connecting to hosting agent…";
   return (
     <div className="connection-strip">
       <span className={dotClass} />

@@ -23,8 +23,11 @@ target/
 **/Cargo.lock.bak
 
 # Tauri build artifacts
-src-tauri/gen/
-src-tauri/WixTools/
+**/src-tauri/gen/
+**/src-tauri/WixTools/
+
+# Local Claude Code worktree / session state
+.claude/
 
 # Editor / OS
 .DS_Store

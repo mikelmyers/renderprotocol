@@ -1,203 +1,185 @@
-// Cross-platform file watcher for the configuration substrate.
+// File-system watcher for the `config/` directory.
 //
-// Watches the `config/` directory recursively and emits a
-// `config:changed` Tauri event whenever a `.md` file under it is created,
-// modified, removed, or renamed. The frontend reloads the relevant slice
-// on each change.
+// Watches `agent.md` and `user.md` only, scoped to the resolved `config/`
+// path — no recursive descent, no other paths. On modify/create/remove,
+// re-reads the changed file, parses it, updates the in-process store, and
+// emits a Tauri event to the frontend.
 //
-// Debouncing is local — editors save in multiple steps (tmp write →
-// rename) and we don't want to fan out three "changed" events per
-// keystroke. The watcher coalesces bursts inside a 250ms window.
+// Security: scope is intentionally narrow. The watcher does not list,
+// read, or watch anything outside `config/`. The path is resolved once at
+// startup and stored as a canonical absolute path so symlink games can't
+// later redirect us elsewhere.
 
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use parking_lot::Mutex;
 use serde::Serialize;
-use serde_json::json;
-use tauri::{AppHandle, Emitter, Manager};
-use tokio::sync::mpsc;
+use tauri::{AppHandle, Emitter};
 
-use crate::audit::NewEvent;
-use crate::config_store::{ConfigKind, ConfigStore};
-use crate::AppState;
+use crate::config_parser::{self, ParsedDocument};
 
-const DEBOUNCE: Duration = Duration::from_millis(250);
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ConfigChangedEvent {
-    pub kind: ConfigKind,
-    pub key: String,
-    pub action: ConfigChangeAction,
+#[derive(Default)]
+pub struct ConfigStore {
+    pub agent: Option<ParsedDocument>,
+    pub user: Option<ParsedDocument>,
+    /// Canonical absolute path; compared against canonicalized event paths
+    /// so a symlink swap can't trick us into reading a different file.
+    pub agent_path: PathBuf,
+    pub user_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ConfigChangeAction {
-    Reloaded,
-    Removed,
+pub struct ConfigUpdatedPayload {
+    pub file: &'static str,
 }
 
-/// Spawn the watcher. Returns immediately; the watcher lives for the
-/// lifetime of the app via the returned guard (move it into AppState
-/// or leak it — Tauri's setup hook does the latter implicitly).
-pub fn spawn(
-    app: AppHandle,
+/// Resolve the `config/` directory. Override with the
+/// `RENDERPROTOCOL_CONFIG_DIR` env var; otherwise resolves relative to the
+/// `src-tauri/` crate at build time. The returned path is canonicalized so
+/// the watcher comparisons stay symlink-safe.
+pub fn resolve_config_dir() -> PathBuf {
+    let raw = if let Ok(p) = std::env::var("RENDERPROTOCOL_CONFIG_DIR") {
+        PathBuf::from(p)
+    } else {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("..")
+            .join("config")
+    };
+    raw.canonicalize().unwrap_or(raw)
+}
+
+/// Initial load + start the watcher. Returned RecommendedWatcher must be
+/// held for the lifetime of the app — dropping it stops the watch.
+pub fn start(
     config_dir: PathBuf,
-    store: Arc<ConfigStore>,
-) -> notify::Result<RecommendedWatcher> {
-    let (tx, mut rx) = mpsc::unbounded_channel::<Event>();
+    store: Arc<Mutex<ConfigStore>>,
+    app: AppHandle,
+) -> Result<RecommendedWatcher, String> {
+    let agent_path = config_dir.join("agent.md");
+    let user_path = config_dir.join("user.md");
 
-    let mut watcher = notify::recommended_watcher(move |res: notify::Result<Event>| {
-        if let Ok(event) = res {
-            let _ = tx.send(event);
+    let agent_canon = agent_path.canonicalize().unwrap_or_else(|_| agent_path.clone());
+    let user_canon = user_path.canonicalize().unwrap_or_else(|_| user_path.clone());
+
+    {
+        let mut s = store
+            .lock()
+            .map_err(|e| format!("config store lock poisoned: {e}"))?;
+        s.agent_path = agent_canon.clone();
+        s.user_path = user_canon.clone();
+        if let Ok(c) = std::fs::read_to_string(&agent_path) {
+            s.agent = Some(config_parser::parse(&c));
+        } else {
+            tracing::warn!(path = %agent_path.display(), "agent.md not readable at startup");
         }
-    })?;
-    watcher.watch(&config_dir, RecursiveMode::Recursive)?;
-
-    let pending: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
-    let last_burst: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
-
-    // Receiver loop — collects events into a debounce buffer and flushes
-    // after the burst settles.
-    let pending_clone = pending.clone();
-    let last_burst_clone = last_burst.clone();
-    tauri::async_runtime::spawn(async move {
-        while let Some(event) = rx.recv().await {
-            if !is_md_event(&event) {
-                continue;
-            }
-            for p in event.paths.iter() {
-                if path_is_md(p) {
-                    pending_clone.lock().push(p.clone());
-                }
-            }
-            *last_burst_clone.lock() = Some(Instant::now());
+        if let Ok(c) = std::fs::read_to_string(&user_path) {
+            s.user = Some(config_parser::parse(&c));
+        } else {
+            tracing::warn!(path = %user_path.display(), "user.md not readable at startup");
         }
-    });
+    }
 
-    // Flush loop — wakes periodically; if a burst has settled, processes.
-    let app_for_flush = app.clone();
-    let store_for_flush = store.clone();
-    let config_dir_for_flush = config_dir.clone();
-    tauri::async_runtime::spawn(async move {
-        loop {
-            tokio::time::sleep(DEBOUNCE).await;
-            let should_flush = {
-                let last = last_burst.lock();
-                match *last {
-                    Some(t) if t.elapsed() >= DEBOUNCE => true,
-                    _ => false,
+    let store_handler = Arc::clone(&store);
+    let app_handler = app.clone();
+
+    let mut watcher: RecommendedWatcher = notify::recommended_watcher(
+        move |res: Result<Event, notify::Error>| {
+            let event = match res {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::warn!(error = %e, "config watcher event error");
+                    return;
                 }
             };
-            if !should_flush {
-                continue;
+
+            // Access events are noise. Modify/Create/Remove cover the cases
+            // editors produce when saving (atomic-rename, in-place rewrite,
+            // delete-then-create). Anything else: ignore.
+            match event.kind {
+                EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_) => {}
+                _ => return,
             }
-            *last_burst.lock() = None;
-            let paths: Vec<PathBuf> = {
-                let mut p = pending.lock();
-                std::mem::take(&mut *p)
-            };
-            // De-dupe paths — same file edited multiple times in the burst.
-            let mut unique: Vec<PathBuf> = Vec::new();
-            for p in paths {
-                if !unique.iter().any(|q| q == &p) {
-                    unique.push(p);
+
+            for path in event.paths {
+                let canon = path.canonicalize().unwrap_or_else(|_| path.clone());
+                if let Err(e) = handle_changed(&canon, &store_handler, &app_handler) {
+                    tracing::warn!(error = %e, path = %canon.display(), "config reload failed");
                 }
             }
-            for path in unique {
-                handle_path(&app_for_flush, &store_for_flush, &config_dir_for_flush, &path).await;
-            }
-        }
-    });
+        },
+    )
+    .map_err(|e| e.to_string())?;
 
+    watcher
+        .watch(&config_dir, RecursiveMode::NonRecursive)
+        .map_err(|e| e.to_string())?;
+
+    tracing::info!(dir = %config_dir.display(), "config watcher started");
     Ok(watcher)
 }
 
-async fn handle_path(
+fn handle_changed(
+    canon_path: &std::path::Path,
+    store: &Arc<Mutex<ConfigStore>>,
     app: &AppHandle,
-    store: &ConfigStore,
-    config_dir: &Path,
-    path: &Path,
-) {
-    let Some((kind, key)) = classify(config_dir, path) else {
-        return;
-    };
-    if path.exists() {
-        match tokio::fs::read_to_string(path).await {
-            Ok(text) => {
-                store.upsert(kind.clone(), &key, &text);
-                audit(app, "config.reloaded", json!({
-                    "kind": kind_str(&kind),
-                    "key": &key,
-                    "bytes": text.len(),
-                }));
-                let _ = app.emit(
-                    "config:changed",
-                    ConfigChangedEvent {
-                        kind,
-                        key,
-                        action: ConfigChangeAction::Reloaded,
-                    },
-                );
-            }
-            Err(e) => {
-                tracing::warn!(path = %path.display(), error = %e, "failed to read config file");
-            }
-        }
+) -> Result<(), String> {
+    // Match against the canonical paths captured at startup. Any path
+    // outside those two is dropped silently — defense-in-depth on top of
+    // the non-recursive watch.
+    let mut s = store
+        .lock()
+        .map_err(|e| format!("config store lock poisoned: {e}"))?;
+
+    let (slot_is_agent, target_path) = if canon_path == s.agent_path {
+        (true, s.agent_path.clone())
+    } else if canon_path == s.user_path {
+        (false, s.user_path.clone())
     } else {
-        store.remove(&kind, &key);
-        audit(app, "config.removed", json!({
-            "kind": kind_str(&kind),
-            "key": &key,
-        }));
-        let _ = app.emit(
-            "config:changed",
-            ConfigChangedEvent {
-                kind,
-                key,
-                action: ConfigChangeAction::Removed,
-            },
-        );
+        return Ok(());
+    };
+
+    let new_doc = match std::fs::read_to_string(&target_path) {
+        Ok(c) => Some(config_parser::parse(&c)),
+        Err(e) => {
+            // File temporarily missing during atomic-rename save is normal;
+            // a follow-up Create event lands the new content. Don't clear
+            // the cache on a transient miss.
+            tracing::debug!(error = %e, path = %target_path.display(), "config read miss; keeping last good");
+            return Ok(());
+        }
+    };
+
+    let changed = if slot_is_agent {
+        doc_changed(&s.agent, &new_doc)
+    } else {
+        doc_changed(&s.user, &new_doc)
+    };
+
+    if !changed {
+        return Ok(());
     }
+
+    if slot_is_agent {
+        s.agent = new_doc;
+    } else {
+        s.user = new_doc;
+    }
+    drop(s);
+
+    let payload = ConfigUpdatedPayload {
+        file: if slot_is_agent { "agent.md" } else { "user.md" },
+    };
+    let _ = app.emit("config:updated", payload);
+    Ok(())
 }
 
-fn kind_str(kind: &ConfigKind) -> &'static str {
-    match kind {
-        ConfigKind::User => "user",
-        ConfigKind::Agent => "agent",
+fn doc_changed(a: &Option<ParsedDocument>, b: &Option<ParsedDocument>) -> bool {
+    match (a, b) {
+        (None, None) => false,
+        (Some(x), Some(y)) => x.body != y.body,
+        _ => true,
     }
-}
-
-fn audit(app: &AppHandle, kind: &str, payload: serde_json::Value) {
-    if let Some(state) = app.try_state::<AppState>() {
-        state.audit.record(NewEvent::of(kind.to_string(), payload));
-    }
-}
-
-fn classify(config_dir: &Path, path: &Path) -> Option<(ConfigKind, String)> {
-    let rel = path.strip_prefix(config_dir).ok()?;
-    let mut comps = rel.components();
-    let first = comps.next()?.as_os_str().to_str()?.to_string();
-    let stem = path.file_stem()?.to_str()?.to_string();
-    if first == "user.md" {
-        return Some((ConfigKind::User, "user".to_string()));
-    }
-    if first == "agents" {
-        return Some((ConfigKind::Agent, stem));
-    }
-    None
-}
-
-fn is_md_event(event: &Event) -> bool {
-    matches!(
-        event.kind,
-        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
-    )
-}
-
-fn path_is_md(p: &Path) -> bool {
-    matches!(p.extension().and_then(|s| s.to_str()), Some("md"))
 }

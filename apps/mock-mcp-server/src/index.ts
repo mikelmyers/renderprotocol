@@ -3,155 +3,131 @@ import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
+import { lookupDefinition, handleLookup, LookupInput } from "./tools/lookup.js";
 import {
-  mailGetInboxDefinition,
-  handleMailGetInbox,
-} from "./tools/mail-get-inbox.js";
+  listItemsDefinition,
+  handleListItems,
+  ListItemsInput,
+} from "./tools/list-items.js";
 import {
-  calendarGetTodayDefinition,
-  handleCalendarGetToday,
-} from "./tools/calendar-get-today.js";
+  getAlertsDefinition,
+  handleGetAlerts,
+  GetAlertsInput,
+} from "./tools/get-alerts.js";
 import {
-  messagesGetRecentDefinition,
-  handleMessagesGetRecent,
-} from "./tools/messages-get-recent.js";
+  getRecentEventsDefinition,
+  handleGetRecentEvents,
+  GetRecentEventsInput,
+} from "./tools/get-recent-events.js";
+import { widgetDefinition, widgetMeta, handleWidget, WidgetInput } from "./tools/widget.js";
 import {
-  newsGetFollowingDefinition,
-  handleNewsGetFollowing,
-} from "./tools/news-get-following.js";
-import {
-  weatherGetLocalDefinition,
-  handleWeatherGetLocal,
-} from "./tools/weather-get-local.js";
-import {
-  docsGetRecentDefinition,
-  handleDocsGetRecent,
-} from "./tools/docs-get-recent.js";
-import {
-  recordActionDefinition,
-  handleRecordAction,
-} from "./tools/record-action.js";
-import { UI_RESOURCES } from "./ui-resources/hello.js";
+  WIDGET_RESOURCE_URI,
+  WIDGET_MIME_TYPE,
+  WIDGET_RESOURCE_META,
+  widgetHtml,
+} from "./ui-resources/widget.js";
+import { AGENT_NAME, AGENT_VERSION, isToolEnabled } from "./agent-context.js";
 
-// Mock MCP server. MCP core + ui:// resources + server-initiated
-// notifications over the Streamable HTTP transport's GET /mcp SSE channel.
-//
-// One process exposes six "service" tools (mail / calendar / messages /
-// news / weather / docs) plus the domain-agnostic record_action and the
-// hello sandbox ui:// resource. The per-tool name prefix
-// (`<service>_<verb>`) lets the host trace which service produced each
-// piece of the morning brief.
+// Mock MCP server. Honest implementation of MCP core over Streamable HTTP.
+// One process per hosting agent; the carrier connects to many in parallel.
+// MOCK_AGENT_NAME, PORT, and MOCK_TOOLS env vars parameterize this instance
+// so the same code runs as alpha, beta, and any other identity we want.
 
 const PORT = Number(process.env.PORT ?? 4717);
-
-interface Session {
-  transport: StreamableHTTPServerTransport;
-  server: McpServer;
-}
-
-const sessions = new Map<string, Session>();
+// Loopback only. The mock server must never be reachable off-host. If we
+// later need cross-host access (e.g. testing on a separate machine), it
+// will be a deliberate config flag, not the default.
+const HOST = "127.0.0.1";
 
 function buildServer(): McpServer {
   const server = new McpServer(
-    { name: "renderprotocol-mock-mcp", version: "0.0.0" },
+    { name: `renderprotocol-mock-mcp:${AGENT_NAME}`, version: AGENT_VERSION },
     { capabilities: { tools: {}, resources: {}, logging: {} } },
   );
 
-  // ── tools ─────────────────────────────────────────────────────────
-  server.registerTool(
-    mailGetInboxDefinition.name,
-    {
-      title: mailGetInboxDefinition.title,
-      description: mailGetInboxDefinition.description,
-      inputSchema: mailGetInboxDefinition.inputSchema.shape,
-    },
-    async () => handleMailGetInbox(),
-  );
-
-  server.registerTool(
-    calendarGetTodayDefinition.name,
-    {
-      title: calendarGetTodayDefinition.title,
-      description: calendarGetTodayDefinition.description,
-      inputSchema: calendarGetTodayDefinition.inputSchema.shape,
-    },
-    async () => handleCalendarGetToday(),
-  );
-
-  server.registerTool(
-    messagesGetRecentDefinition.name,
-    {
-      title: messagesGetRecentDefinition.title,
-      description: messagesGetRecentDefinition.description,
-      inputSchema: messagesGetRecentDefinition.inputSchema.shape,
-    },
-    async () => handleMessagesGetRecent(),
-  );
-
-  server.registerTool(
-    newsGetFollowingDefinition.name,
-    {
-      title: newsGetFollowingDefinition.title,
-      description: newsGetFollowingDefinition.description,
-      inputSchema: newsGetFollowingDefinition.inputSchema.shape,
-    },
-    async () => handleNewsGetFollowing(),
-  );
-
-  server.registerTool(
-    weatherGetLocalDefinition.name,
-    {
-      title: weatherGetLocalDefinition.title,
-      description: weatherGetLocalDefinition.description,
-      inputSchema: weatherGetLocalDefinition.inputSchema.shape,
-    },
-    async () => handleWeatherGetLocal(),
-  );
-
-  server.registerTool(
-    docsGetRecentDefinition.name,
-    {
-      title: docsGetRecentDefinition.title,
-      description: docsGetRecentDefinition.description,
-      inputSchema: docsGetRecentDefinition.inputSchema.shape,
-    },
-    async () => handleDocsGetRecent(),
-  );
-
-  server.registerTool(
-    recordActionDefinition.name,
-    {
-      title: recordActionDefinition.title,
-      description: recordActionDefinition.description,
-      inputSchema: recordActionDefinition.inputSchema.shape,
-    },
-    async (input) =>
-      handleRecordAction(
-        input as {
-          action_id: string;
-          intent: string;
-          decision: "approve" | "reject";
-          payload?: Record<string, unknown>;
-        },
-      ),
-  );
-
-  // ── ui:// resources (SEP-1865) ───────────────────────────────────
-  for (const r of Object.values(UI_RESOURCES)) {
-    server.registerResource(
-      r.name,
-      r.uri,
+  if (isToolEnabled(lookupDefinition.name)) {
+    server.registerTool(
+      lookupDefinition.name,
       {
-        title: r.name,
-        description: r.description,
-        mimeType: r.mimeType,
+        title: lookupDefinition.title,
+        description: lookupDefinition.description,
+        inputSchema: lookupDefinition.inputSchema.shape,
+      },
+      async (args) => handleLookup(LookupInput.parse(args)),
+    );
+  }
+
+  if (isToolEnabled(listItemsDefinition.name)) {
+    server.registerTool(
+      listItemsDefinition.name,
+      {
+        title: listItemsDefinition.title,
+        description: listItemsDefinition.description,
+        inputSchema: listItemsDefinition.inputSchema.shape,
+      },
+      async (args) => handleListItems(ListItemsInput.parse(args)),
+    );
+  }
+
+  if (isToolEnabled(getAlertsDefinition.name)) {
+    server.registerTool(
+      getAlertsDefinition.name,
+      {
+        title: getAlertsDefinition.title,
+        description: getAlertsDefinition.description,
+        inputSchema: getAlertsDefinition.inputSchema.shape,
+      },
+      async (args) => handleGetAlerts(GetAlertsInput.parse(args)),
+    );
+  }
+
+  if (isToolEnabled(getRecentEventsDefinition.name)) {
+    server.registerTool(
+      getRecentEventsDefinition.name,
+      {
+        title: getRecentEventsDefinition.title,
+        description: getRecentEventsDefinition.description,
+        inputSchema: getRecentEventsDefinition.inputSchema.shape,
+      },
+      async (args) => handleGetRecentEvents(GetRecentEventsInput.parse(args)),
+    );
+  }
+
+  // SEP-1865: tools associate with a UI resource via _meta.ui.resourceUri.
+  // The host fetches the resource separately via resources/read and renders
+  // it in a sandboxed iframe; this tool's structured result is what the
+  // host then forwards to the iframe via ui/notifications/tool-result.
+  if (isToolEnabled(widgetDefinition.name)) {
+    server.registerTool(
+      widgetDefinition.name,
+      {
+        title: widgetDefinition.title,
+        description: widgetDefinition.description,
+        inputSchema: widgetDefinition.inputSchema.shape,
+        _meta: widgetMeta,
+      },
+      async (args) => handleWidget(WidgetInput.parse(args)),
+    );
+
+    // The UI resource the widget tool points at. Served via standard
+    // resources/read; the _meta.ui block tells the host how to construct
+    // the iframe's CSP / permissions. Only registered when the widget tool
+    // is enabled — agents that don't ship the tool shouldn't claim its UI.
+    server.registerResource(
+      "widget-ui",
+      WIDGET_RESOURCE_URI,
+      {
+        mimeType: WIDGET_MIME_TYPE,
+        description: "MCP Apps view for the `widget` tool.",
+        _meta: WIDGET_RESOURCE_META,
       },
       async () => ({
         contents: [
           {
-            uri: r.uri,
-            mimeType: r.mimeType,
-            text: r.text,
+            uri: WIDGET_RESOURCE_URI,
+            mimeType: WIDGET_MIME_TYPE,
+            text: widgetHtml(),
+            _meta: WIDGET_RESOURCE_META,
           },
         ],
       }),
@@ -161,61 +137,35 @@ function buildServer(): McpServer {
   return server;
 }
 
-// ── server-initiated notifications ────────────────────────────────────
-// Keeps the resources/updated mechanism exercised after the scenario
-// pivot. The host's notifications bridge maps URIs to tool refetches,
-// so flagging mail_get_inbox as "updated" prompts the host to refetch
-// and the mail card recomposes — the same generic mechanism the drone
-// scenario used for fleet status.
-
-function broadcast(method: string, params: unknown): void {
-  for (const { server } of sessions.values()) {
-    server.server
-      .notification({
-        method,
-        params: params as Record<string, unknown> | undefined,
-      })
-      .catch((err) => {
-        console.warn(`[mock-mcp] notification ${method} failed:`, err);
-      });
-  }
-}
-
-setInterval(() => {
-  if (sessions.size === 0) return;
-  broadcast("notifications/resources/updated", {
-    uri: "renderprotocol://tool/mail_get_inbox",
-  });
-}, 30000);
-
-// ── transport plumbing ───────────────────────────────────────────────
 const app = express();
-app.use(express.json());
+// Bound payload size — we don't expect anything close to 1MB on the wire
+// for v0, and an explicit cap blocks pathological JSON-RPC bodies from
+// exhausting memory.
+app.use(express.json({ limit: "256kb" }));
+
+// Stateful sessions are only meaningful once we add server-initiated
+// notifications (next increment). For now we keep the session map ready and
+// route by mcp-session-id so the wiring is in place.
+const transports = new Map<string, StreamableHTTPServerTransport>();
 
 app.post("/mcp", async (req, res) => {
   try {
     const sessionId = req.headers["mcp-session-id"] as string | undefined;
-    let session = sessionId ? sessions.get(sessionId) : undefined;
+    let transport = sessionId ? transports.get(sessionId) : undefined;
 
-    if (!session && isInitializeRequest(req.body)) {
-      let registered: Session | undefined;
-      const transport = new StreamableHTTPServerTransport({
+    if (!transport && isInitializeRequest(req.body)) {
+      transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         onsessioninitialized: (id) => {
-          if (registered) sessions.set(id, registered);
+          transports.set(id, transport!);
         },
       });
       transport.onclose = () => {
-        if (transport.sessionId) sessions.delete(transport.sessionId);
+        if (transport!.sessionId) transports.delete(transport!.sessionId);
       };
       const server = buildServer();
-      registered = { transport, server };
-      // Widen — SDK's Transport.onclose is required, but
-      // StreamableHTTPServerTransport declares it optional. Safe: onclose
-      // is set above.
-      await server.connect(transport as unknown as Parameters<typeof server.connect>[0]);
-      session = registered;
-    } else if (!session) {
+      await server.connect(transport);
+    } else if (!transport) {
       res.status(400).json({
         jsonrpc: "2.0",
         error: { code: -32000, message: "no session and not an initialize request" },
@@ -224,7 +174,7 @@ app.post("/mcp", async (req, res) => {
       return;
     }
 
-    await session.transport.handleRequest(req, res, req.body);
+    await transport.handleRequest(req, res, req.body);
   } catch (err) {
     console.error("[mock-mcp] POST /mcp failed", err);
     if (!res.headersSent) {
@@ -239,33 +189,21 @@ app.post("/mcp", async (req, res) => {
 
 const handleSessionStream: express.RequestHandler = async (req, res) => {
   const sessionId = req.headers["mcp-session-id"] as string | undefined;
-  const session = sessionId ? sessions.get(sessionId) : undefined;
-  if (!session) {
+  const transport = sessionId ? transports.get(sessionId) : undefined;
+  if (!transport) {
     res.status(400).send("invalid or missing session id");
     return;
   }
-  await session.transport.handleRequest(req, res);
+  await transport.handleRequest(req, res);
 };
 
 app.get("/mcp", handleSessionStream);
 app.delete("/mcp", handleSessionStream);
 
 app.get("/healthz", (_req, res) => {
-  res.json({
-    ok: true,
-    sessions: sessions.size,
-    tools: [
-      mailGetInboxDefinition.name,
-      calendarGetTodayDefinition.name,
-      messagesGetRecentDefinition.name,
-      newsGetFollowingDefinition.name,
-      weatherGetLocalDefinition.name,
-      docsGetRecentDefinition.name,
-      recordActionDefinition.name,
-    ],
-  });
+  res.json({ ok: true, sessions: transports.size });
 });
 
-app.listen(PORT, () => {
-  console.log(`[mock-mcp] listening on http://127.0.0.1:${PORT}/mcp`);
+app.listen(PORT, HOST, () => {
+  console.log(`[mock-mcp:${AGENT_NAME}] listening on http://${HOST}:${PORT}/mcp`);
 });

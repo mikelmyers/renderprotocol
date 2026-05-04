@@ -1,12 +1,11 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capability for the main window. Permits frontend to invoke registered Tauri commands and listen for events.",
+  "description": "Main window: invoke registered Tauri commands and listen for events. No shell, no fs, no http surface granted to the frontend; least privilege until each capability is needed.",
   "windows": ["main"],
   "permissions": [
     "core:default",
     "core:event:allow-listen",
-    "core:event:allow-unlisten",
-    "shell:default"
+    "core:event:allow-unlisten"
   ]
 }

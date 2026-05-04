@@ -7,10 +7,8 @@
 // as the wire calls. Cleaner than a Node broker hop.
 
 pub mod client;
-pub mod notifications;
 
-pub use client::{McpClient, McpError, ResourceReadResult, ToolCallResult};
-pub use notifications::McpNotification;
+pub use client::{McpClient, McpError, ToolCallResult};
 
 use crate::protocols::ProtocolAdapter;
 
