@@ -776,11 +776,19 @@ pub fn score(
         .unwrap_or(COLD_START_LATENCY_MS);
     let latency_term = 1.0 / (1.0 + p50 / 100.0);
 
-    let auth = authority_cache
-        .get(agent_id)
-        .copied()
-        .unwrap_or(AUTHORITY_COLD_START_FLOOR)
-        .max(AUTHORITY_COLD_START_FLOOR);
+    // Authority is held at 1.0 (neutral) in the v0 multiplicative score.
+    // On a single-querier graph, normalized share-of-successes degenerates
+    // into the same signal reliability already captures, but compounds
+    // it and creates the "loser of the first roll never gets sampled"
+    // lockout. Authority *computation* still happens — surfaced in
+    // `carrier_status.scores` for telemetry. It activates back into the
+    // multiplicative score when the vouch graph develops real
+    // structure (mutual punishment + multi-querier paths) in 5b/5c.
+    // Until then, ε-greedy in `pick_provider` provides the exploration
+    // tier and reliability + latency carry the ranking signal.
+    let _ = authority_cache.get(agent_id);
+    let _ = AUTHORITY_COLD_START_FLOOR;
+    let auth = 1.0_f64;
 
     let ar = adversarial_resistance(
         agent_id,
