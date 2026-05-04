@@ -20,13 +20,13 @@ It is a working document. Sections may need revision after the first prototype p
 
 ### 1.1 What this is, in one sentence
 
-An open agent network with a closed ranking algorithm running the best routing inside it, accessed through a free consumer-quality render surface that scales to operator-grade workflows.
+An open agent network with a closed ranking algorithm running the best routing inside it, accessed through a free consumer-quality render surface.
 
 ### 1.2 The three layers, with revised emphasis
 
 The original design document treated the surface as the primary product and the carrier as supporting infrastructure. Research and conversation revealed this was backward in terms of long-term value capture. The revised emphasis:
 
-**Layer 1: Render surface (the demand wedge).** Free, consumer-quality, scales to operator-grade. This is where humans go. Its job is adoption, not profit. Beautiful, fast, low-friction. The surface is the customer-acquisition mechanism for the carrier business underneath.
+**Layer 1: Render surface (the demand wedge).** Free, consumer-quality. This is where humans go. Its job is adoption, not profit. Beautiful, fast, low-friction. No paid tier — the surface stays free at every level. The surface is the customer-acquisition mechanism for the carrier business underneath.
 
 **Layer 2: Carrier (the moat and the money).** The discovery and routing layer for the agent network. Closed proprietary ranking algorithm. Open protocols around it (receipts, federation, query API, capability declarations). Long-term, this is where the largest revenue lives — through transaction take rates, attestation services, and premium placement.
 
@@ -42,7 +42,9 @@ This is the core architectural decision and it deserves to be stated clearly.
 
 This architecture is precedented. Cloudflare runs the dominant DNS resolver on a fully open DNS protocol. Google ran the dominant search engine on fully open HTTP/HTML. The pattern is: open infrastructure, closed intelligence on top. It scales, it earns trust, and it makes lock-in suspicions weak because the open parts genuinely make data and reputation portable.
 
-### 1.4 The wedge: operator-grade for autonomous physical systems
+### 1.4 ~~The wedge: operator-grade for autonomous physical systems~~ *(deprecated)*
+
+> **Deprecated.** The vertical-wedge framing was retired during the May-2026 pivot to "agent browser, period." `product_plan.md §1` and §6 reflect the current position: the carrier and the browser are domain-agnostic and there is no vertical wedge. The drone-ops vocabulary in this section is historical context. See also the `project_render_protocol_pivot` memory.
 
 The first specific operator vertical is *autonomous physical systems operations* — drone fleets, eventually agricultural autonomy, security and surveillance, infrastructure inspection, search and rescue, maritime, ground autonomy.
 
@@ -82,7 +84,7 @@ This is non-negotiable for the strategy to work. Every browser, search engine, s
 
 ### 2.2 Where the money is
 
-**Operator-grade tier (subscription, $30-100/seat/month).** Multi-context support. Advanced audit and replay. Team features. Enterprise admin (SSO, audit export, data residency). Specialist carrier integrations. Enterprise MCP server connections. Support and SLAs. Linear-tier pricing for genuine operator workflows.
+The render surface is free, full stop — no subscription, no paid tier, no premium features. All revenue is carrier-side. (An earlier draft of this doc proposed an operator-grade subscription tier; that has been removed per `product_plan.md §2.1`. Keeping the surface uniformly free simplifies the product, the onboarding, and the customer-support burden.)
 
 **Carrier transaction take rate (largest long-term line).** When the carrier routes a call that involves payment via x402/ACP/MPP, the carrier takes a small percentage. Visa-style economics. At scale, this is the dominant revenue line. $1B routed at 1% take rate is $10M in carrier revenue. Real volume in 5+ years could be much larger.
 
@@ -96,11 +98,11 @@ This is non-negotiable for the strategy to work. Every browser, search engine, s
 
 ### 2.3 The economic shape over time
 
-**Years 1-2.** Free consumer surface (customer acquisition). Operator tier launching. Carrier revenue minimal (no volume yet). Cost center funded by Mikel, possibly seed capital. Probably losing money or breaking even.
+**Years 1-2.** Free consumer surface (customer acquisition). Carrier revenue minimal (no volume yet). Cost center funded by Mikel, possibly seed capital. Probably losing money or breaking even.
 
-**Years 3-4.** Consumer surface scaled. Operator tier generating real subscription revenue. Carrier seeing meaningful transaction volume. Mixed revenue. Profitable on operator tier and carrier together; consumer surface still subsidized.
+**Years 3-4.** Consumer surface scaled. Carrier seeing meaningful transaction volume — take rate + attestations begin to cover ongoing operating costs. Consumer surface still subsidized.
 
-**Years 5+.** If the carrier has won meaningful share, carrier transaction revenue dominates. Render surface remains free. Operator tier generates steady subscription revenue. Carrier infrastructure generates the largest profits. Visa / Mastercard / Cloudflare / Google structural profile.
+**Years 5+.** If the carrier has won meaningful share, carrier transaction revenue dominates. Render surface remains free. Carrier infrastructure generates the profits. Visa / Mastercard / Cloudflare / Google structural profile.
 
 ---
 
@@ -181,9 +183,9 @@ This is good news, not bad news. It means:
 
 - The first build is cheaper. We don't invent the rendering protocol; we build on it.
 - Compatibility is built in. Servers built for Claude or ChatGPT will work in our surface and vice versa.
-- Differentiation is at the host level, not the protocol level. Multi-source composition, operator-grade features, audit, configuration substrate, and the carrier layer are where we win.
+- Differentiation is at the host level, not the protocol level. Multi-source composition, audit, configuration substrate, and the carrier layer are where we win.
 
-The render surface is, structurally, an MCP Apps host with operator-grade extensions and a default carrier built in. That is the design starting point for the prototype.
+The render surface is, structurally, an MCP Apps host with multi-source composition and a default carrier built in. That is the design starting point for the prototype.
 
 ---
 
