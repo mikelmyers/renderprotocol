@@ -5,7 +5,8 @@
   "description": "v0 of the render surface — an agent-native operator interface on MCP + MCP Apps",
   "scripts": {
     "dev": "bash scripts/dev.sh",
-    "dev:mock": "pnpm --filter @renderprotocol/mock-mcp-server dev",
+    "dev:mock-a": "pnpm --filter @renderprotocol/mock-mcp-server dev:alpha",
+    "dev:mock-b": "pnpm --filter @renderprotocol/mock-mcp-server dev:beta",
     "dev:host": "pnpm --filter @renderprotocol/host tauri dev",
     "build": "pnpm -r build",
     "typecheck": "pnpm -r typecheck"

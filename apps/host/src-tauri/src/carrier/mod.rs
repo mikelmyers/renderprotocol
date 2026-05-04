@@ -1,28 +1,32 @@
-// Carrier layer. v0 ships a passthrough implementation that forwards user-agent
-// calls directly to the configured MCP adapter with no routing logic — no
-// discovery, no ranking, no federation. The seam exists so the eventual
-// RouteRank-style carrier slots in here without touching call sites in
-// `commands/` or the bus.
-//
-// The trait is the contract for that future swap.
+// Carrier layer. v0 ships RoutingCarrier — connects to N hosting agents
+// (declared in `config/hosting-agents.md`), aggregates their tool
+// catalogs, picks a provider per call (lowest recent latency for shared
+// tools), and records receipts in memory. Step 5 layers RouteRank on top
+// of the same Receipt substrate.
 
-pub mod passthrough;
-
-use crate::protocols::mcp::ToolCallResult;
-use serde_json::Value;
+pub mod receipts;
+pub mod registry;
+pub mod routing;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CarrierError {
     #[error(transparent)]
     Mcp(#[from] crate::protocols::mcp::McpError),
+    #[error("no ready hosting agent provides: {0}")]
+    NoProvider(String),
 }
 
 pub trait CarrierRouter: Send + Sync {
     fn name(&self) -> &'static str;
 }
 
-// v0: the carrier exposes a small async surface. We keep it as inherent
-// methods on the concrete `PassthroughCarrier` rather than forcing them
-// through a `dyn`-safe trait — the trait gains shape once the second
-// implementation arrives and we can see what actually generalizes.
-pub use passthrough::PassthroughCarrier;
+pub use routing::{
+    AgentStatusEntry, CarrierStatus, CatalogEntry, HostingAgent, RoutedResourceResult,
+    RoutedToolCallResult, RoutingCarrier,
+};
+
+impl CarrierRouter for RoutingCarrier {
+    fn name(&self) -> &'static str {
+        "routing"
+    }
+}

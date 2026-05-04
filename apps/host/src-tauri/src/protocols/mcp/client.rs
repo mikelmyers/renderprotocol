@@ -103,9 +103,18 @@ impl McpClient {
     }
 
     pub async fn initialize(&self) -> Result<Value, McpError> {
+        // SEP-1865: declare the MCP Apps extension so servers know we can
+        // render their `ui://` resources. The extension identifier and
+        // mimeType allowlist are spec-mandated.
         let params = json!({
             "protocolVersion": PROTOCOL_VERSION,
-            "capabilities": {},
+            "capabilities": {
+                "extensions": {
+                    "io.modelcontextprotocol/ui": {
+                        "mimeTypes": ["text/html;profile=mcp-app"]
+                    }
+                }
+            },
             "clientInfo": {
                 "name": "renderprotocol-host",
                 "version": "0.0.0",
@@ -157,6 +166,16 @@ impl McpClient {
         Ok(result)
     }
 
+    /// Standard MCP `resources/read`. Returns the raw response (typically
+    /// `{ contents: [...] }`); host-side code applies any further validation
+    /// such as size caps before handing the content to UI primitives.
+    pub async fn read_resource(&self, uri: &str) -> Result<Value, McpError> {
+        let result = self
+            .request("resources/read", Some(json!({ "uri": uri })))
+            .await?;
+        Ok(result)
+    }
+
     pub async fn call_tool(
         &self,
         name: &str,
@@ -182,7 +201,33 @@ impl McpClient {
         Ok(ToolCallResult { raw, structured, text })
     }
 
+    /// Wrapper that recovers from session invalidation. The server can lose
+    /// our session for several reasons in practice — server restart (common
+    /// in dev), session expiry, network drop. On a 4xx from the server we
+    /// clear the cached session, call `initialize()` once, and retry the
+    /// request. A second 4xx propagates as an error.
+    ///
+    /// Concurrent re-initializes are not gated; at worst two requests
+    /// re-init in parallel and last write wins. Acceptable for v0; a Notify
+    /// barrier or single-flight pattern lands when production load matters.
     async fn request(&self, method: &str, params: Option<Value>) -> Result<Value, McpError> {
+        match self.try_request(method, params.clone()).await {
+            Ok(v) => Ok(v),
+            Err(McpError::HttpStatus(status)) if status.is_client_error() => {
+                tracing::info!(
+                    %status,
+                    method,
+                    "session likely invalid; re-initializing and retrying"
+                );
+                *self.session_id.write() = None;
+                self.initialize().await?;
+                self.try_request(method, params).await
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn try_request(&self, method: &str, params: Option<Value>) -> Result<Value, McpError> {
         let session = self.session_id.read().clone().ok_or(McpError::NotInitialized)?;
         let id = self.alloc_id();
         let body = JsonRpcRequest { jsonrpc: "2.0", id, method, params };
