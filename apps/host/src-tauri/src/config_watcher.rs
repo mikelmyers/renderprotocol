@@ -51,6 +51,24 @@ pub fn resolve_config_dir() -> PathBuf {
     raw.canonicalize().unwrap_or(raw)
 }
 
+/// Resolve where the carrier persists state (SQLite, key material).
+/// Override with the `RENDERPROTOCOL_DATA_DIR` env var; otherwise lives
+/// alongside `config/` as a sibling `data/` directory. v0 uses a single
+/// SQLite file at `${data_dir}/carrier.db`.
+pub fn resolve_data_dir() -> PathBuf {
+    // Don't canonicalize — the directory may not exist yet on first
+    // boot. The Storage layer creates it on open.
+    if let Ok(p) = std::env::var("RENDERPROTOCOL_DATA_DIR") {
+        PathBuf::from(p)
+    } else {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("..")
+            .join("data")
+    }
+}
+
 /// Initial load + start the watcher. Returned RecommendedWatcher must be
 /// held for the lifetime of the app — dropping it stops the watch.
 pub fn start(

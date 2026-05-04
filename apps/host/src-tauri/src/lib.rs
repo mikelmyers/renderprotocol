@@ -10,7 +10,9 @@ use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
 
 use crate::bus::Bus;
+use crate::carrier::payments::{PaymentBackend, StubBackend};
 use crate::carrier::registry::{self, HostingAgentSpec};
+use crate::carrier::storage::Storage;
 use crate::carrier::RoutingCarrier;
 use crate::config_watcher::ConfigStore;
 
@@ -49,7 +51,40 @@ pub fn run() {
     if agent_specs.is_empty() {
         tracing::warn!("no hosting agents configured; carrier will have nothing to route to");
     }
-    let carrier = Arc::new(RoutingCarrier::new(agent_specs));
+
+    // 5c: open the persistent SQLite store and hydrate the carrier from
+    // it. If anything fails (path unwritable, schema mismatch), fall
+    // back to ephemeral in-memory storage so the demo still boots —
+    // restart-survival is a feature degradation, not a hard
+    // requirement.
+    let data_dir = config_watcher::resolve_data_dir();
+    let db_path = data_dir.join("carrier.db");
+    let storage = match Storage::open(&db_path) {
+        Ok(s) => Arc::new(s),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                path = %db_path.display(),
+                "carrier storage unavailable; falling back to ephemeral in-memory store"
+            );
+            Arc::new(
+                Storage::open_in_memory_for_runtime()
+                    .expect("in-memory SQLite should always succeed"),
+            )
+        }
+    };
+    let payments: Arc<dyn PaymentBackend> = Arc::new(StubBackend::new());
+    let carrier = match RoutingCarrier::with_storage(
+        agent_specs.clone(),
+        Arc::clone(&storage),
+        Arc::clone(&payments),
+    ) {
+        Ok(c) => Arc::new(c),
+        Err(e) => {
+            tracing::warn!(error = %e, "carrier construction with storage failed; falling back");
+            Arc::new(RoutingCarrier::new(agent_specs))
+        }
+    };
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -99,6 +134,10 @@ pub fn run() {
             commands::mcp::mcp_read_resource,
             commands::mcp::mcp_status,
             commands::mcp::carrier_status,
+            commands::mcp::carrier_admin_vouch,
+            commands::mcp::carrier_admin_revoke_vouch,
+            commands::mcp::carrier_admin_forfeit,
+            commands::mcp::acp_checkout,
             commands::bus::bus_emit,
             commands::config::current_agent_md,
             commands::config::current_user_md,
@@ -130,9 +169,21 @@ fn load_agent_specs() -> Vec<HostingAgentSpec> {
 }
 
 fn default_specs() -> Vec<HostingAgentSpec> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
     vec![HostingAgentSpec {
         id: "alpha".to_string(),
         endpoint: "http://127.0.0.1:4717/mcp".to_string(),
         description: Some("Built-in default; override via config/hosting-agents.md".to_string()),
+        bond_amount: 0,
+        onboarded_at_ms: now_ms,
+        // Built-in default is the v0 anchor — bootstrap kernel member.
+        seed: true,
+        price_per_call_cents: 0,
+        carrier_take_rate_bps: 100,
+        merchant_account_id: String::new(),
     }]
 }

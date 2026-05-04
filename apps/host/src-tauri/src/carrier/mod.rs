@@ -4,9 +4,15 @@
 // tools), and records receipts in memory. Step 5 layers RouteRank on top
 // of the same Receipt substrate.
 
+pub mod keys;
+pub mod lifecycle;
+pub mod payments;
 pub mod receipts;
 pub mod registry;
 pub mod routing;
+pub mod scoring;
+pub mod storage;
+pub mod vouches;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CarrierError {
@@ -14,6 +20,8 @@ pub enum CarrierError {
     Mcp(#[from] crate::protocols::mcp::McpError),
     #[error("no ready hosting agent provides: {0}")]
     NoProvider(String),
+    #[error("carrier storage: {0}")]
+    Storage(String),
 }
 
 pub trait CarrierRouter: Send + Sync {
@@ -22,7 +30,7 @@ pub trait CarrierRouter: Send + Sync {
 
 pub use routing::{
     AgentStatusEntry, CarrierStatus, CatalogEntry, HostingAgent, RoutedResourceResult,
-    RoutedToolCallResult, RoutingCarrier,
+    RoutedToolCallResult, RoutingCarrier, ScoreSnapshotEntry,
 };
 
 impl CarrierRouter for RoutingCarrier {
